@@ -8,6 +8,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
   workflow_dispatch:

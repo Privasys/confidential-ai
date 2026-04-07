@@ -1,0 +1,85 @@
+{
+  "tools": [
+    {
+      "name": "chat",
+      "description": "Send a chat completion request to the confidential LLM. Returns reproducible AI inference results with full attestation metadata including model, quantization, seed, and TEE environment details.",
+      "endpoint": "/v1/chat/completions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model identifier (e.g. gpt-oss-120b)"
+          },
+          "messages": {
+            "type": "string",
+            "description": "JSON array of message objects with role and content fields"
+          },
+          "temperature": {
+            "type": "string",
+            "description": "Sampling temperature (0.0-2.0, default: 0.7)",
+            "default": "0.7"
+          },
+          "max_tokens": {
+            "type": "string",
+            "description": "Maximum tokens to generate",
+            "default": "1024"
+          },
+          "seed": {
+            "type": "string",
+            "description": "Random seed for reproducible output (default: 0)",
+            "default": "0"
+          }
+        },
+        "required": ["messages"]
+      }
+    },
+    {
+      "name": "complete",
+      "description": "Send a text completion request to the confidential LLM. Completes a given prompt with reproducible inference metadata.",
+      "endpoint": "/v1/completions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model identifier (e.g. gpt-oss-120b)"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The prompt text to complete"
+          },
+          "temperature": {
+            "type": "string",
+            "description": "Sampling temperature (0.0-2.0, default: 0.7)",
+            "default": "0.7"
+          },
+          "max_tokens": {
+            "type": "string",
+            "description": "Maximum tokens to generate",
+            "default": "1024"
+          }
+        },
+        "required": ["prompt"]
+      }
+    },
+    {
+      "name": "models",
+      "description": "List available models on this confidential AI instance.",
+      "endpoint": "/v1/models",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "health",
+      "description": "Check the health status and reproducibility configuration of this confidential AI instance. Returns model, quantization, TEE type, and image digest.",
+      "endpoint": "/health",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

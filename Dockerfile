@@ -1,3 +1,11 @@
+# Confidential AI - Reproducible Inference Proxy
+#
+# This Dockerfile builds the Go proxy that wraps vLLM and injects reproducibility
+# metadata into every inference response. The proxy is designed to run inside a
+# TDX Confidential VM alongside a vLLM backend.
+#
+# For production with GPU + vLLM, see Dockerfile.prod.
+
 FROM golang:1.22-bookworm AS builder
 
 WORKDIR /src
@@ -8,21 +16,19 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/
 
 # ---
 
-FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
-
-ARG VLLM_VERSION=0.19.0
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3-pip ca-certificates curl && \
+    ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages \
-    vllm==${VLLM_VERSION}
-
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
-COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
-RUN chmod +x /opt/confidential-ai/entrypoint.sh
 
-EXPOSE 8000 8080
+EXPOSE 8080
 
-ENTRYPOINT ["/opt/confidential-ai/entrypoint.sh"]
+CMD ["confidential-ai", \
+     "--listen", ":8080", \
+     "--vllm-upstream", "http://localhost:8000", \
+     "--model", "gpt-oss-120b", \
+     "--quantization", "awq", \
+     "--tee-type", "tdx"]

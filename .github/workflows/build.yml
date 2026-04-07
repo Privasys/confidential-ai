@@ -67,5 +67,6 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.prod
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.name }}:latest

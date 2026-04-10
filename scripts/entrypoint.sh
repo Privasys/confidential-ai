@@ -1,9 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL="${MODEL_NAME:-google/gemma-4-31b-it}"
+MODEL="${MODEL_NAME:-}"
+if [[ -z "$MODEL" ]]; then
+  echo "[confidential-ai] ERROR: MODEL_NAME environment variable is required"
+  exit 1
+fi
 QUANT="${QUANTIZATION:-}"
-DTYPE="${DTYPE:-bfloat16}"
+DTYPE="${DTYPE:-auto}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_PORT="${VLLM_PORT:-8000}"

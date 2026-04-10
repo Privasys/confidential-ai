@@ -29,6 +29,4 @@ EXPOSE 8080
 CMD ["confidential-ai", \
      "--listen", ":8080", \
      "--vllm-upstream", "http://localhost:8000", \
-     "--model", "gpt-oss-120b", \
-     "--quantization", "awq", \
      "--tee-type", "tdx"]

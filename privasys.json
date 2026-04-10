@@ -81,5 +81,9 @@
         "properties": {}
       }
     }
-  ]
+  ],
+  "ui": {
+    "url": "https://raw.githubusercontent.com/Privasys/confidential-ai/main/ui/index.html",
+    "label": "Chat"
+  }
 }

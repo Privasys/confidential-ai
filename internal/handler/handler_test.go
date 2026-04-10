@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,6 +215,137 @@ func TestVLLMUpstreamError(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 
 	// Should pass through the 500 from vLLM
+	if rec.Code != 500 {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestStreamingChatCompletions(t *testing.T) {
+	// Mock vLLM streaming backend (SSE)
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		if req["seed"] == nil {
+			t.Error("seed was not injected into streaming request")
+		}
+		if req["stream"] != true {
+			t.Error("stream field should be true")
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// Simulate vLLM SSE: two content chunks + [DONE]
+		chunks := []string{
+			`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hel"},"index":0}]}`,
+			`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{"content":"lo"},"index":0}]}`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{
+		VLLMUpstream: vllm.URL,
+		ModelName:    "test-model",
+		Quantization: "none",
+		GPUType:      "H100-80GB",
+		TeeType:      "tdx",
+		VLLMVersion:  "0.19.0",
+		CUDAVersion:  "13.0",
+	})
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	body := `{"messages":[{"role":"user","content":"hi"}],"temperature":0.7,"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected text/event-stream, got %s", ct)
+	}
+
+	// Parse SSE events
+	scanner := bufio.NewScanner(rec.Body)
+	var dataLines []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+		}
+	}
+
+	// Should have: chunk1, chunk2, reproducibility, [DONE]
+	if len(dataLines) < 4 {
+		t.Fatalf("expected at least 4 data lines, got %d: %v", len(dataLines), dataLines)
+	}
+
+	// Second-to-last should be reproducibility metadata
+	reproLine := dataLines[len(dataLines)-2]
+	var reproEvent map[string]any
+	if err := json.Unmarshal([]byte(reproLine), &reproEvent); err != nil {
+		t.Fatalf("failed to parse reproducibility event: %v (line: %s)", err, reproLine)
+	}
+
+	repro, ok := reproEvent["reproducibility"].(map[string]any)
+	if !ok {
+		t.Fatal("missing reproducibility key in metadata event")
+	}
+
+	if repro["model"] != "test-model" {
+		t.Errorf("expected model test-model, got %v", repro["model"])
+	}
+	if repro["tee_type"] != "tdx" {
+		t.Errorf("expected tee_type tdx, got %v", repro["tee_type"])
+	}
+	if seed, ok := repro["seed"].(float64); !ok || seed != 0 {
+		t.Errorf("expected seed 0, got %v", repro["seed"])
+	}
+
+	// Last should be [DONE]
+	lastLine := dataLines[len(dataLines)-1]
+	if lastLine != "[DONE]" {
+		t.Errorf("expected last data line to be [DONE], got %s", lastLine)
+	}
+}
+
+func TestStreamingErrorPassthrough(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"model not loaded"}`))
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{
+		VLLMUpstream: vllm.URL,
+		ModelName:    "test-model",
+	})
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	body := `{"messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
 	if rec.Code != 500 {
 		t.Fatalf("expected 500, got %d", rec.Code)
 	}

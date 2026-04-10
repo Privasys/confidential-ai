@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +64,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 
 // proxyWithReproducibility reads the request, proxies to vLLM, then
 // wraps the response with reproducibility metadata.
+// Supports both streaming (SSE) and non-streaming responses.
 func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string) {
 	h.requestsTotal.Add(1)
 
@@ -119,21 +122,6 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MiB limit
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadGateway, "failed to read upstream response")
-		return
-	}
-
-	// If vLLM returned an error, pass it through
-	if resp.StatusCode != http.StatusOK {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
-		return
-	}
-
 	// Build reproducibility metadata
 	meta := reproducibility.NewMetadata(
 		*reqParams.Seed,
@@ -149,6 +137,30 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		h.cfg.ImageDigest,
 		h.cfg.TeeType,
 	)
+
+	if reqParams.Stream {
+		h.proxyStream(w, resp, meta)
+	} else {
+		h.proxyNonStream(w, resp, meta)
+	}
+}
+
+// proxyNonStream handles non-streaming responses: read full body, inject metadata.
+func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata) {
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MiB limit
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, "failed to read upstream response")
+		return
+	}
+
+	// If vLLM returned an error, pass it through
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
 
 	// Parse vLLM response and inject metadata
 	var vllmResp map[string]any
@@ -168,6 +180,67 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(vllmResp)
+}
+
+// proxyStream handles streaming SSE responses from vLLM.
+// It forwards each chunk as-is, then emits a final reproducibility event
+// before the [DONE] sentinel.
+func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata) {
+	if resp.StatusCode != http.StatusOK {
+		// Error responses are not streamed; read and pass through.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // up to 1 MiB per line
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Forward the [DONE] sentinel last, after our metadata event.
+		if strings.TrimSpace(line) == "data: [DONE]" {
+			// Emit reproducibility metadata as a final SSE event
+			metaJSON, err := json.Marshal(map[string]any{"reproducibility": meta})
+			if err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", metaJSON)
+				flusher.Flush()
+			}
+			// Now send [DONE]
+			fmt.Fprintf(w, "%s\n", line)
+			flusher.Flush()
+			continue
+		}
+
+		// Forward every other line verbatim
+		fmt.Fprintf(w, "%s\n", line)
+
+		// Flush on data lines (SSE events are terminated by blank lines)
+		if line == "" {
+			flusher.Flush()
+		}
+	}
+
+	// If the stream ended without [DONE] (e.g. connection dropped),
+	// still try to emit metadata.
+	if err := scanner.Err(); err != nil {
+		h.requestsFailed.Add(1)
+	}
 }
 
 // proxyDirect forwards the request to vLLM without modification.
@@ -233,6 +306,7 @@ type requestParams struct {
 	TopK        int     `json:"top_k"`
 	MaxTokens   int     `json:"max_tokens"`
 	Model       string  `json:"model"`
+	Stream      bool    `json:"stream"`
 }
 
 // injectSeed ensures the "seed" field is present in the request JSON.

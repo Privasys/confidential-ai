@@ -1,23 +1,35 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL="${MODEL_NAME:-gpt-oss-120b}"
-QUANT="${QUANTIZATION:-awq}"
+MODEL="${MODEL_NAME:-google/gemma-4-31b-it}"
+QUANT="${QUANTIZATION:-}"
+DTYPE="${DTYPE:-bfloat16}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 PROXY_PORT="${LISTEN_ADDR:-:8080}"
 
-echo "[confidential-ai] Starting vLLM for model=$MODEL quantization=$QUANT"
+echo "[confidential-ai] Starting vLLM for model=$MODEL quantization=$QUANT dtype=$DTYPE"
 
-# Start vLLM in the background
-vllm serve "$MODEL" \
-  --seed 0 \
-  --tensor-parallel-size 1 \
-  --quantization "$QUANT" \
-  --enable-batch-invariance \
-  --disable-log-requests \
-  --max-model-len 16384 \
-  --gpu-memory-utilization 0.92 \
-  --port "$VLLM_PORT" &
+# Build vLLM args
+VLLM_ARGS=(
+  --seed 0
+  --tensor-parallel-size 1
+  --enforce-eager
+  --no-enable-log-requests
+  --max-model-len "$MAX_MODEL_LEN"
+  --gpu-memory-utilization "$GPU_MEM"
+  --dtype "$DTYPE"
+  --port "$VLLM_PORT"
+)
+
+if [[ -n "$QUANT" && "$QUANT" != "none" ]]; then
+  VLLM_ARGS+=(--quantization "$QUANT")
+fi
+
+# Start vLLM in the background (V0 engine for reproducibility)
+VLLM_USE_V1=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONHASHSEED=0 \
+vllm serve "$MODEL" "${VLLM_ARGS[@]}" &
 
 VLLM_PID=$!
 

@@ -10,16 +10,17 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/
 
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
-# vLLM main branch: required for Gemma 4 (gemma4 architecture) and other
-# recent model support that hasn't landed in a release yet.
-ARG VLLM_REF=main
+# vLLM nightly: pre-built wheels from main branch, required for Gemma 4
+# (gemma4 architecture) and other recent model support not yet in a release.
+# Wheels are published for every commit on main at https://wheels.vllm.ai/nightly
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3-pip ca-certificates curl git && \
+    python3.12 python3.12-venv python3-pip ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages \
-    "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_REF}"
+RUN pip3 install --no-cache-dir --break-system-packages uv && \
+    uv pip install --system --torch-backend=auto vllm \
+    --extra-index-url https://wheels.vllm.ai/nightly
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh

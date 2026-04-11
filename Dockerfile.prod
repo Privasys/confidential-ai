@@ -10,14 +10,16 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/
 
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
-ARG VLLM_VERSION=0.19.0
+# vLLM main branch: required for Gemma 4 (gemma4 architecture) and other
+# recent model support that hasn't landed in a release yet.
+ARG VLLM_REF=main
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3-pip ca-certificates curl && \
+    python3.12 python3.12-venv python3-pip ca-certificates curl git && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --break-system-packages \
-    vllm==${VLLM_VERSION}
+    "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_REF}"
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh

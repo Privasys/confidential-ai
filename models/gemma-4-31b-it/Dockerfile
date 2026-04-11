@@ -3,6 +3,9 @@
 # Dense 30.7B parameter model from Google. Fits on a single H100 80GB in BF16.
 # Model is downloaded from HuggingFace at first startup (~62 GB).
 #
+# Requires vLLM main branch: the gemma4 architecture is not in any release yet.
+# Once a vLLM release includes Gemma 4 support, switch back to a pinned version.
+#
 # Build:
 #   docker build -t ghcr.io/privasys/confidential-ai-gemma4:latest .
 #
@@ -12,21 +15,9 @@
 #     -v model-cache:/root/.cache/huggingface \
 #     ghcr.io/privasys/confidential-ai-gemma4:latest
 
-FROM vllm/vllm-openai:v0.19.0
+FROM ghcr.io/privasys/confidential-ai:latest
 
-# Reproducibility: force V0 engine and deterministic CUDA
-ENV VLLM_USE_V1=0
-ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
-ENV PYTHONHASHSEED=0
+ENV MODEL_NAME=google/gemma-4-31b-it
+ENV DTYPE=bfloat16
 
-EXPOSE 8000
-
-CMD ["--model", "google/gemma-4-31b-it", \
-     "--seed", "0", \
-     "--tensor-parallel-size", "1", \
-     "--enforce-eager", \
-     "--no-enable-log-requests", \
-     "--max-model-len", "8192", \
-     "--gpu-memory-utilization", "0.90", \
-     "--dtype", "bfloat16", \
-     "--port", "8000"]
+EXPOSE 8000 8080

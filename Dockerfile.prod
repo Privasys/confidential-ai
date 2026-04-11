@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3-pip ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=auto vllm \
     --extra-index-url https://wheels.vllm.ai/nightly

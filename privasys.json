@@ -9,7 +9,7 @@
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model identifier (e.g. gpt-oss-120b)"
+            "description": "Model identifier (e.g. google/gemma-4-31b-it)"
           },
           "messages": {
             "type": "string",
@@ -43,7 +43,7 @@
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model identifier (e.g. gpt-oss-120b)"
+            "description": "Model identifier (e.g. google/gemma-4-31b-it)"
           },
           "prompt": {
             "type": "string",

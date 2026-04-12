@@ -13,7 +13,7 @@ Client
          |
          +--> vLLM backend (Python, port 8000)
                 |
-                +--> H100 80GB (INT4 AWQ quantization)
+                +--> H100 80GB
 ```
 
 The proxy:
@@ -33,10 +33,10 @@ Every inference response includes:
     "seed": 0,
     "temperature": 0.7,
     "top_p": 0.95,
-    "model": "gpt-oss-120b",
-    "quantization": "awq",
+    "model": "google/gemma-4-31b-it",
+    "quantization": "",
     "vllm_version": "0.19.0",
-    "cuda_version": "12.6",
+    "cuda_version": "13.0",
     "gpu": "H100-80GB",
     "tensor_parallel_size": 1,
     "batch_invariance": true,
@@ -59,8 +59,7 @@ go build -o confidential-ai ./cmd/server/
 ./confidential-ai \
   --listen :8080 \
   --vllm-upstream http://localhost:8000 \
-  --model gpt-oss-120b \
-  --quantization awq \
+  --model google/gemma-4-31b-it \
   --gpu-type H100-80GB \
   --tee-type tdx \
   --image-digest sha256:abc123
@@ -69,12 +68,16 @@ go build -o confidential-ai ./cmd/server/
 ### Docker (full stack: vLLM + proxy)
 
 ```bash
-docker build -t confidential-ai .
-docker run --gpus all -p 8080:8080 \
-  -e MODEL_NAME=gpt-oss-120b \
-  -e QUANTIZATION=awq \
+docker build -f Dockerfile.prod -t confidential-ai .
+docker run --gpus all -p 8080:8080 -p 8000:8000 \
+  -e MODEL_NAME=google/gemma-4-31b-it \
+  -e HF_TOKEN=<your-token> \
+  -v model-cache:/root/.cache/huggingface \
   confidential-ai
 ```
+
+See [models/](models/) for pre-configured model images and the full list
+of supported models.
 
 ### GCP Confidential VM (a3-highgpu-1g, TDX)
 

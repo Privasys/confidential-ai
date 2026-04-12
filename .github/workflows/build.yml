@@ -67,12 +67,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: repo
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Read privasys.json
+        id: manifest
+        run: |
+          if [ -f privasys.json ]; then
+            # Compact JSON to a single line for OCI label
+            echo "json=$(jq -c . privasys.json)" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.prod
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.name }}:latest
+          labels: |
+            org.privasys.manifest=${{ steps.manifest.outputs.json }}
 
   models:
     name: Build model images
@@ -99,8 +108,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: repo
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Read privasys.json
+        id: manifest
+        run: |
+          if [ -f privasys.json ]; then
+            echo "json=$(jq -c . privasys.json)" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: models/${{ matrix.model.name }}
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.name }}-${{ matrix.model.tag }}:latest
+          labels: |
+            org.privasys.manifest=${{ steps.manifest.outputs.json }}

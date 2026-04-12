@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
-    uv pip install --system --torch-backend=auto vllm \
+    uv pip install --system --torch-backend=cu126 vllm \
     --extra-index-url https://wheels.vllm.ai/nightly
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai

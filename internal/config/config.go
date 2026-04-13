@@ -10,6 +10,7 @@ type Config struct {
 	Listen       string // HTTP listen address
 	VLLMUpstream string // vLLM backend URL
 	ModelName    string // model identifier for metadata
+	ModelDigest  string // SHA-256 of model weights index (for attestation OID 3.5)
 	Quantization string // quantization method (awq, gptq, fp8, etc.)
 	GPUType      string // GPU hardware identifier
 	ImageDigest  string // CVM image SHA256 digest
@@ -30,6 +31,8 @@ func Parse(args []string) (*Config, error) {
 		"vLLM backend URL (env: VLLM_UPSTREAM)")
 	fs.StringVar(&cfg.ModelName, "model", envOr("MODEL_NAME", ""),
 		"Model name for reproducibility metadata (env: MODEL_NAME)")
+	fs.StringVar(&cfg.ModelDigest, "model-digest", envOr("MODEL_DIGEST", ""),
+		"SHA-256 of model weights index for attestation (env: MODEL_DIGEST)")
 	fs.StringVar(&cfg.Quantization, "quantization", envOr("QUANTIZATION", ""),
 		"Quantization method (env: QUANTIZATION)")
 	fs.StringVar(&cfg.GPUType, "gpu-type", envOr("GPU_TYPE", "H100-80GB"),

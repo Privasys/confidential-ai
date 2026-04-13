@@ -332,6 +332,7 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":       "ok",
 		"model":        h.cfg.ModelName,
+		"model_digest": h.cfg.ModelDigest,
 		"quantization": h.cfg.Quantization,
 		"gpu":          h.cfg.GPUType,
 		"tee":          h.cfg.TeeType,

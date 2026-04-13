@@ -1,9 +1,39 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL="${MODEL_NAME:-}"
-if [[ -z "$MODEL" ]]; then
-  echo "[confidential-ai] ERROR: MODEL_NAME environment variable is required"
+# --- Model resolution ---------------------------------------------------
+# Accepts MODEL_URL (preferred) or MODEL_NAME (legacy).
+#
+#   file:///models/google/gemma-4-31b-it   Local path (pre-loaded on disk)
+#   hf://TOKEN@google/gemma-4-31b-it       HuggingFace with embedded token
+#   hf://google/gemma-4-31b-it             HuggingFace (public or HF_TOKEN env)
+#   google/gemma-4-31b-it                  Plain model name (same as hf://)
+#
+MODEL_URL="${MODEL_URL:-}"
+MODEL_NAME="${MODEL_NAME:-}"
+
+if [[ -n "$MODEL_URL" ]]; then
+  case "$MODEL_URL" in
+    file://*)
+      MODEL="${MODEL_URL#file://}"
+      ;;
+    hf://*)
+      hf_path="${MODEL_URL#hf://}"
+      if [[ "$hf_path" == *@* ]]; then
+        export HF_TOKEN="${hf_path%%@*}"
+        MODEL="${hf_path#*@}"
+      else
+        MODEL="$hf_path"
+      fi
+      ;;
+    *)
+      MODEL="$MODEL_URL"
+      ;;
+  esac
+elif [[ -n "$MODEL_NAME" ]]; then
+  MODEL="$MODEL_NAME"
+else
+  echo "[confidential-ai] ERROR: MODEL_URL or MODEL_NAME is required"
   exit 1
 fi
 QUANT="${QUANTIZATION:-}"
@@ -51,10 +81,50 @@ for i in $(seq 1 120); do
   sleep 5
 done
 
+# --- Compute model identity digest for attestation (OID 3.5) -----------
+# Uses the safetensors index file (lists all weight shards + metadata)
+# as a proxy for the full model identity. Falls back to config.json.
+MODEL_DIGEST=""
+MODEL_DIR="$MODEL"
+
+# If MODEL is a HuggingFace repo name, resolve the cached snapshot path
+if [[ ! -d "$MODEL_DIR" ]]; then
+  MODEL_DIR=$(python3 -c "
+from pathlib import Path
+import os
+cache = Path(os.environ.get('HF_HOME', Path.home() / '.cache' / 'huggingface')) / 'hub'
+repo = 'models--' + '${MODEL}'.replace('/', '--')
+snap_dir = cache / repo / 'snapshots'
+if snap_dir.is_dir():
+    snaps = sorted(snap_dir.iterdir())
+    if snaps: print(snaps[-1])
+" 2>/dev/null || true)
+fi
+
+if [[ -n "$MODEL_DIR" && -d "$MODEL_DIR" ]]; then
+  if [[ -f "$MODEL_DIR/model.safetensors.index.json" ]]; then
+    MODEL_DIGEST=$(sha256sum "$MODEL_DIR/model.safetensors.index.json" | cut -d' ' -f1)
+    echo "[confidential-ai] Model digest (safetensors index): $MODEL_DIGEST"
+  elif [[ -f "$MODEL_DIR/.sha256" ]]; then
+    MODEL_DIGEST=$(cat "$MODEL_DIR/.sha256")
+    echo "[confidential-ai] Model digest (pre-computed): $MODEL_DIGEST"
+  elif [[ -f "$MODEL_DIR/config.json" ]]; then
+    MODEL_DIGEST=$(sha256sum "$MODEL_DIR/config.json" | cut -d' ' -f1)
+    echo "[confidential-ai] Model digest (config.json): $MODEL_DIGEST"
+  fi
+fi
+
+# Derive a display name from the model path for metadata
+DISPLAY_NAME="$MODEL"
+if [[ "$DISPLAY_NAME" == /models/* ]]; then
+  DISPLAY_NAME="${DISPLAY_NAME#/models/}"
+fi
+
 # Start the Go proxy server
 echo "[confidential-ai] Starting reproducibility proxy on $PROXY_PORT"
 exec /usr/local/bin/confidential-ai \
   --listen "$PROXY_PORT" \
   --vllm-upstream "http://localhost:$VLLM_PORT" \
-  --model "$MODEL" \
-  --quantization "$QUANT"
+  --model "$DISPLAY_NAME" \
+  --quantization "$QUANT" \
+  --model-digest "$MODEL_DIGEST"

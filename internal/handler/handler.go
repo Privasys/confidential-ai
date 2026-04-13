@@ -41,8 +41,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.chatCompletions)
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("GET /v1/models", h.models)
+	mux.HandleFunc("POST /v1/models", h.models)
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("POST /health", h.health)
 	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("POST /healthz", h.health)
 	mux.HandleFunc("GET /metrics", h.metrics)
 }
 

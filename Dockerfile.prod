@@ -15,7 +15,8 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 # Wheels are published for every commit on main at https://wheels.vllm.ai/nightly
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3-pip ca-certificates curl && \
+    python3.12 python3.12-venv python3-pip ca-certificates curl \
+    gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1

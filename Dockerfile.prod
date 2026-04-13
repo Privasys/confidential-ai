@@ -22,7 +22,8 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu126 vllm \
-    --extra-index-url https://wheels.vllm.ai/nightly
+    --extra-index-url https://wheels.vllm.ai/nightly && \
+    uv pip install --system --upgrade transformers
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh

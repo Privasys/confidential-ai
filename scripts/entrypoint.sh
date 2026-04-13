@@ -16,6 +16,7 @@ if [[ -n "$MODEL_URL" ]]; then
   case "$MODEL_URL" in
     file://*)
       MODEL="${MODEL_URL#file://}"
+      export HF_HUB_OFFLINE=1
       ;;
     hf://*)
       hf_path="${MODEL_URL#hf://}"

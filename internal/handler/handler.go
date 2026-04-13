@@ -346,8 +346,8 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 
 // attestationExtensions serves custom OID extensions for RA-TLS certificates.
 // This is the Virtual equivalent of enclave-os-mini's custom_oids() trait
-// method: the container declares its own attestation OIDs, and ra-tls-caddy
-// pulls them at certificate issuance time.
+// method: the container declares its own attestation OIDs, and Caddy's RA-TLS
+// module pulls them at certificate issuance time.
 //
 // Currently serves OID 3.5 (model digest) when a model digest is configured.
 func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) {

@@ -122,7 +122,7 @@ fi
 
 # Start the Go proxy server.
 # The proxy serves /.well-known/attestation-extensions with the model digest
-# (OID 3.5) so ra-tls-caddy can pull it at certificate issuance time - the
+# (OID 3.5) so the RA-TLS module can pull it at certificate issuance time - the
 # Virtual equivalent of enclave-os-mini's custom_oids() trait.
 echo "[confidential-ai] Starting reproducibility proxy on $PROXY_PORT"
 exec /usr/local/bin/confidential-ai \

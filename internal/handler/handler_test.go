@@ -21,6 +21,7 @@ func TestHealthEndpoint(t *testing.T) {
 		VLLMVersion:  "0.19.0",
 		CUDAVersion:  "12.6",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -51,6 +52,10 @@ func TestHealthEndpoint(t *testing.T) {
 func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 	// Mock vLLM backend
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		// Verify seed was injected
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
@@ -76,6 +81,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		CUDAVersion:  "12.6",
 		ImageDigest:  "sha256:abc123",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -166,6 +172,7 @@ func TestCompletionsEndpoint(t *testing.T) {
 		GPUType:      "H100-80GB",
 		TeeType:      "tdx",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -204,6 +211,7 @@ func TestVLLMUpstreamError(t *testing.T) {
 		VLLMUpstream: vllm.URL,
 		ModelName:    "test-model",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -223,6 +231,10 @@ func TestVLLMUpstreamError(t *testing.T) {
 func TestStreamingChatCompletions(t *testing.T) {
 	// Mock vLLM streaming backend (SSE)
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		if req["seed"] == nil {
@@ -263,6 +275,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 		VLLMVersion:  "0.19.0",
 		CUDAVersion:  "13.0",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -336,6 +349,7 @@ func TestStreamingErrorPassthrough(t *testing.T) {
 		VLLMUpstream: vllm.URL,
 		ModelName:    "test-model",
 	})
+	h.ready.Store(1)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)

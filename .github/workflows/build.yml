@@ -93,6 +93,10 @@ jobs:
         model:
           - name: gemma-4-31b-it
             tag: gemma4
+          - name: qwen2.5-32b-instruct
+            tag: qwen25
+          - name: mistral-small-24b-instruct-2501
+            tag: mistral-small
     steps:
       - uses: actions/checkout@v6
       - name: Free disk space

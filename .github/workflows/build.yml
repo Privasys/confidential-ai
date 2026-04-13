@@ -97,6 +97,8 @@ jobs:
             tag: qwen25
           - name: mistral-small-24b-instruct-2501
             tag: mistral-small
+          - name: llama-4-scout-17b-16e-instruct
+            tag: llama4-scout
     steps:
       - uses: actions/checkout@v6
       - name: Free disk space

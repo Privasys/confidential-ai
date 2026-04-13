@@ -79,6 +79,22 @@ docker run --gpus all -p 8080:8080 -p 8000:8000 \
 See [models/](models/) for pre-configured model images and the full list
 of supported models.
 
+## Pre-built Model Images
+
+Each model image extends `ghcr.io/privasys/confidential-ai:latest` and declares
+its GCP persistent disk via the `ai.privasys.volume` OCI label. The manager
+reads this label at container start and bind-mounts the disk into the container.
+
+| Image | Model | Parameters | Precision | Disk |
+|-------|-------|-----------|-----------|------|
+| `confidential-ai-gemma4` | google/gemma-4-31b-it | 30.7B (dense) | BF16 | model-gemma4-31b (70 GB) |
+| `confidential-ai-qwen25` | Qwen/Qwen2.5-32B-Instruct | 32.5B (dense) | BF16 | model-qwen25-32b (75 GB) |
+| `confidential-ai-mistral-small` | mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | BF16 | model-mistral-small-24b (55 GB) |
+| `confidential-ai-llama4-scout` | meta-llama/Llama-4-Scout-17B-16E-Instruct | 109B MoE (17B active) | BF16 + INT4 | model-llama4-scout (240 GB) |
+
+All images are published to `ghcr.io/privasys/` and built automatically by CI
+on every push to `main`.
+
 ### GCP Confidential VM (a3-highgpu-1g, TDX)
 
 See `.operations/confidential-ai.md` for full deployment plan and `deploy/` for scripts.

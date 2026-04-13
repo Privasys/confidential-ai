@@ -33,9 +33,16 @@ Optional env vars: `DTYPE` (default: auto), `QUANTIZATION` (awq/gptq/fp8),
 
 ## Per-Model Images
 
-| Folder | Model | Parameters | VRAM (BF16) | Fits H100 80GB |
-|--------|-------|-----------|-------------|----------------|
-| `gemma-4-31b-it` | google/gemma-4-31b-it | 30.7B (dense) | ~62 GB | Yes |
+| Folder | Model | Parameters | Precision | VRAM | Disk |
+|--------|-------|-----------|-----------|------|------|
+| `gemma-4-31b-it` | google/gemma-4-31b-it | 30.7B (dense) | BF16 | ~62 GB | model-gemma4-31b (70 GB) |
+| `qwen2.5-32b-instruct` | Qwen/Qwen2.5-32B-Instruct | 32.5B (dense) | BF16 | ~65 GB | model-qwen25-32b (75 GB) |
+| `mistral-small-24b-instruct-2501` | mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | BF16 | ~48 GB | model-mistral-small-24b (55 GB) |
+| `llama-4-scout-17b-16e-instruct` | meta-llama/Llama-4-Scout-17B-16E-Instruct | 109B MoE (17B active) | BF16 + INT4 | ~58 GB | model-llama4-scout (240 GB) |
+
+Each image declares its GCP persistent disk via a `LABEL ai.privasys.volume`
+entry. The Enclave OS Virtual manager reads this label at container start and
+bind-mounts the disk read-only at `/models`.
 
 ## Build
 

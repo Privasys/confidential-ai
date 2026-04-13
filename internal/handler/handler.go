@@ -21,6 +21,9 @@ type Handler struct {
 	cfg    *config.Config
 	client *http.Client
 
+	// ready is set to 1 once the vLLM upstream health check succeeds.
+	ready atomic.Int32
+
 	// Metrics
 	requestsTotal  atomic.Int64
 	requestsFailed atomic.Int64
@@ -28,12 +31,37 @@ type Handler struct {
 
 // New creates a Handler with the given config.
 func New(cfg *config.Config) *Handler {
-	return &Handler{
+	h := &Handler{
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: 5 * time.Minute, // LLM inference can be slow
 		},
 	}
+	go h.pollUpstreamReady()
+	return h
+}
+
+// pollUpstreamReady polls vLLM's /health endpoint until it returns 200,
+// then sets h.ready to 1. This runs in the background so the proxy can
+// serve user-friendly "loading" responses while the model warms up.
+func (h *Handler) pollUpstreamReady() {
+	client := &http.Client{Timeout: 5 * time.Second}
+	for {
+		resp, err := client.Get(h.cfg.VLLMUpstream + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				h.ready.Store(1)
+				return
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// IsReady returns whether the vLLM upstream is healthy.
+func (h *Handler) IsReady() bool {
+	return h.ready.Load() == 1
 }
 
 // RegisterRoutes adds all endpoints to the given mux.
@@ -62,6 +90,10 @@ func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 
 // models proxies the /v1/models endpoint directly.
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	if !h.IsReady() {
+		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		return
+	}
 	h.proxyDirect(w, r, "/v1/models")
 }
 
@@ -69,6 +101,11 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // wraps the response with reproducibility metadata.
 // Supports both streaming (SSE) and non-streaming responses.
 func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string) {
+	if !h.IsReady() {
+		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		return
+	}
+
 	h.requestsTotal.Add(1)
 
 	// Read the incoming request body
@@ -277,8 +314,21 @@ func (h *Handler) proxyDirect(w http.ResponseWriter, r *http.Request, path strin
 }
 
 // health returns server status and config metadata.
+// Returns 200 when vLLM is ready, 503 when the model is still loading.
 func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if !h.IsReady() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":       "loading",
+			"message":      "Model is loading, please wait...",
+			"model":        h.cfg.ModelName,
+			"quantization": h.cfg.Quantization,
+			"gpu":          h.cfg.GPUType,
+			"tee":          h.cfg.TeeType,
+		})
+		return
+	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":       "ok",
 		"model":        h.cfg.ModelName,

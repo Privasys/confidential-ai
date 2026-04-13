@@ -3,6 +3,8 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +76,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /health", h.health)
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /healthz", h.health)
+	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /metrics", h.metrics)
 }
 
@@ -339,6 +342,34 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 		"vllm_version": h.cfg.VLLMVersion,
 		"image_digest": h.cfg.ImageDigest,
 	})
+}
+
+// attestationExtensions serves custom OID extensions for RA-TLS certificates.
+// This is the Virtual equivalent of enclave-os-mini's custom_oids() trait
+// method: the container declares its own attestation OIDs, and ra-tls-caddy
+// pulls them at certificate issuance time.
+//
+// Currently serves OID 3.5 (model digest) when a model digest is configured.
+func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) {
+	type entry struct {
+		OID   string `json:"oid"`
+		Value string `json:"value"`
+	}
+	var exts []entry
+	if h.cfg.ModelDigest != "" {
+		digestBytes, err := hex.DecodeString(h.cfg.ModelDigest)
+		if err == nil && len(digestBytes) > 0 {
+			exts = append(exts, entry{
+				OID:   "1.3.6.1.4.1.65230.3.5",
+				Value: base64.StdEncoding.EncodeToString(digestBytes),
+			})
+		}
+	}
+	if exts == nil {
+		exts = []entry{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(exts)
 }
 
 // metrics returns Prometheus-compatible metrics.

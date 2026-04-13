@@ -120,20 +120,10 @@ if [[ "$DISPLAY_NAME" == /models/* ]]; then
   DISPLAY_NAME="${DISPLAY_NAME#/models/}"
 fi
 
-# Register model digest with the enclave OS manager so RA-TLS
-# certificates include OID 3.5. Uses the internal API (localhost:9444)
-# which is unauthenticated within the VM trust boundary.
-CONTAINER_NAME="${ENCLAVE_OS_CONTAINER_NAME:-}"
-if [[ -n "$MODEL_DIGEST" && -n "$CONTAINER_NAME" ]]; then
-  echo "[confidential-ai] Registering model digest with enclave OS (OID 3.5)"
-  curl -sf -X PUT \
-    "http://127.0.0.1:9444/api/v1/containers/${CONTAINER_NAME}/extensions" \
-    -H "Content-Type: application/json" \
-    -d "{\"model_digest\":\"${MODEL_DIGEST}\"}" \
-    || echo "[confidential-ai] WARNING: failed to register model digest (manager may not be ready yet)"
-fi
-
-# Start the Go proxy server
+# Start the Go proxy server.
+# The proxy serves /.well-known/attestation-extensions with the model digest
+# (OID 3.5) so ra-tls-caddy can pull it at certificate issuance time - the
+# Virtual equivalent of enclave-os-mini's custom_oids() trait.
 echo "[confidential-ai] Starting reproducibility proxy on $PROXY_PORT"
 exec /usr/local/bin/confidential-ai \
   --listen "$PROXY_PORT" \

@@ -80,6 +80,67 @@
         "type": "object",
         "properties": {}
       }
+    },
+    {
+      "name": "load_model",
+      "description": "Load a model into the confidential AI instance. The model can be a local directory name (e.g. gemma-4-31b-it) or a HuggingFace repo (e.g. google/gemma-4-31b-it). Returns 202 Accepted with loading status.",
+      "endpoint": "/v1/models/load",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model name: local directory (e.g. gemma-4-31b-it) or HuggingFace repo (e.g. google/gemma-4-31b-it)"
+          },
+          "dtype": {
+            "type": "string",
+            "description": "Data type for model weights (auto, bfloat16, float16, float32)",
+            "default": "auto"
+          },
+          "quantization": {
+            "type": "string",
+            "description": "Quantization method (awq, gptq, int4, etc.)"
+          },
+          "max_model_len": {
+            "type": "string",
+            "description": "Maximum model context length",
+            "default": "8192"
+          },
+          "gpu_memory_utilization": {
+            "type": "string",
+            "description": "GPU memory utilization (0.0-1.0)",
+            "default": "0.90"
+          }
+        },
+        "required": ["model"]
+      }
+    },
+    {
+      "name": "model_status",
+      "description": "Check model loading status. Returns state (idle, loading, ready, failed), progress, elapsed time, and error details.",
+      "endpoint": "/v1/models/status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "unload_model",
+      "description": "Unload the current model and stop vLLM. Frees GPU memory so a different model can be loaded.",
+      "endpoint": "/v1/models/unload",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "readiness",
+      "description": "Check if the instance is ready to serve inference requests. Returns 200 when a model is loaded, 503 otherwise.",
+      "endpoint": "/readiness",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ],
   "ui": {

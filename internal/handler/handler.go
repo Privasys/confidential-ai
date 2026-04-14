@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/privasys/confidential-ai/internal/config"
+	"github.com/privasys/confidential-ai/internal/models"
 	"github.com/privasys/confidential-ai/internal/reproducibility"
 )
 
@@ -22,8 +23,10 @@ import (
 type Handler struct {
 	cfg    *config.Config
 	client *http.Client
+	modelMgr *models.Manager
 
 	// ready is set to 1 once the vLLM upstream health check succeeds.
+	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
 	ready atomic.Int32
 
 	// Metrics
@@ -31,15 +34,20 @@ type Handler struct {
 	requestsFailed atomic.Int64
 }
 
-// New creates a Handler with the given config.
-func New(cfg *config.Config) *Handler {
+// New creates a Handler with the given config and model manager.
+// If modelMgr is nil, falls back to legacy mode (polling vLLM at startup).
+func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	h := &Handler{
-		cfg: cfg,
+		cfg:      cfg,
+		modelMgr: modelMgr,
 		client: &http.Client{
 			Timeout: 5 * time.Minute, // LLM inference can be slow
 		},
 	}
-	go h.pollUpstreamReady()
+	// Legacy mode: poll vLLM health at startup if model manager is not used.
+	if modelMgr == nil && cfg.ModelName != "" {
+		go h.pollUpstreamReady()
+	}
 	return h
 }
 
@@ -61,8 +69,11 @@ func (h *Handler) pollUpstreamReady() {
 	}
 }
 
-// IsReady returns whether the vLLM upstream is healthy.
+// IsReady returns whether inference is available (model loaded and serving).
 func (h *Handler) IsReady() bool {
+	if h.modelMgr != nil {
+		return h.modelMgr.IsReady()
+	}
 	return h.ready.Load() == 1
 }
 
@@ -72,6 +83,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("GET /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models", h.models)
+	mux.HandleFunc("POST /v1/models/load", h.modelsLoad)
+	mux.HandleFunc("GET /v1/models/status", h.modelsStatus)
+	mux.HandleFunc("POST /v1/models/unload", h.modelsUnload)
+	mux.HandleFunc("GET /readiness", h.readiness)
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("POST /health", h.health)
 	mux.HandleFunc("GET /healthz", h.health)
@@ -165,15 +180,26 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	}
 	defer resp.Body.Close()
 
-	// Build reproducibility metadata
+	// Build reproducibility metadata.
+	// Use dynamic model info from manager if available, else fall back to config.
+	modelName := h.cfg.ModelName
+	quantization := h.cfg.Quantization
+	if h.modelMgr != nil {
+		if n := h.modelMgr.ModelName(); n != "" {
+			modelName = n
+		}
+		if q := h.modelMgr.Quantization(); q != "" {
+			quantization = q
+		}
+	}
 	meta := reproducibility.NewMetadata(
 		*reqParams.Seed,
 		reqParams.Temperature,
 		reqParams.TopP,
 		reqParams.TopK,
 		reqParams.MaxTokens,
-		h.cfg.ModelName,
-		h.cfg.Quantization,
+		modelName,
+		quantization,
 		h.cfg.VLLMVersion,
 		h.cfg.CUDAVersion,
 		h.cfg.GPUType,
@@ -316,32 +342,114 @@ func (h *Handler) proxyDirect(w http.ResponseWriter, r *http.Request, path strin
 	io.Copy(w, resp.Body)
 }
 
-// health returns server status and config metadata.
-// Returns 200 when vLLM is ready, 503 when the model is still loading.
+// health returns server health status. Always returns 200 to indicate the
+// container is alive. Use /readiness to check if a model is serving.
 func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if !h.IsReady() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]any{
-			"status":       "loading",
-			"message":      "Model is loading, please wait...",
-			"model":        h.cfg.ModelName,
-			"quantization": h.cfg.Quantization,
-			"gpu":          h.cfg.GPUType,
-			"tee":          h.cfg.TeeType,
-		})
-		return
+
+	modelName := h.cfg.ModelName
+	modelDigest := h.cfg.ModelDigest
+	quantization := h.cfg.Quantization
+	modelState := "unknown"
+
+	if h.modelMgr != nil {
+		status := h.modelMgr.Status()
+		modelState = string(status.State)
+		if status.Model != "" {
+			modelName = status.Model
+		}
+		if status.ModelDigest != "" {
+			modelDigest = status.ModelDigest
+		}
+		if q := h.modelMgr.Quantization(); q != "" {
+			quantization = q
+		}
+	} else if h.IsReady() {
+		modelState = "ready"
+	} else {
+		modelState = "loading"
 	}
+
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":       "ok",
-		"model":        h.cfg.ModelName,
-		"model_digest": h.cfg.ModelDigest,
-		"quantization": h.cfg.Quantization,
+		"model_state":  modelState,
+		"model":        modelName,
+		"model_digest": modelDigest,
+		"quantization": quantization,
 		"gpu":          h.cfg.GPUType,
 		"tee":          h.cfg.TeeType,
 		"vllm_version": h.cfg.VLLMVersion,
 		"image_digest": h.cfg.ImageDigest,
 	})
+}
+
+// readiness returns 200 when a model is loaded and serving, 503 otherwise.
+// Use this for load balancing or readiness probes.
+func (h *Handler) readiness(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if !h.IsReady() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "not_ready",
+			"message": "No model loaded or model is still loading",
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+// modelsLoad handles POST /v1/models/load - starts loading a model.
+func (h *Handler) modelsLoad(w http.ResponseWriter, r *http.Request) {
+	if h.modelMgr == nil {
+		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
+		return
+	}
+
+	var req models.LoadRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Model == "" {
+		writeError(w, http.StatusBadRequest, "model field is required")
+		return
+	}
+
+	if err := h.modelMgr.Load(req); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(h.modelMgr.Status())
+}
+
+// modelsStatus handles GET /v1/models/status - returns model loading state.
+func (h *Handler) modelsStatus(w http.ResponseWriter, _ *http.Request) {
+	if h.modelMgr == nil {
+		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.modelMgr.Status())
+}
+
+// modelsUnload handles POST /v1/models/unload - stops vLLM and frees resources.
+func (h *Handler) modelsUnload(w http.ResponseWriter, _ *http.Request) {
+	if h.modelMgr == nil {
+		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
+		return
+	}
+
+	if err := h.modelMgr.Unload(); err != nil {
+		writeError(w, http.StatusInternalServerError, "unload failed: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "idle"})
 }
 
 // attestationExtensions serves custom OID extensions for RA-TLS certificates.
@@ -356,8 +464,17 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 		Value string `json:"value"`
 	}
 	var exts []entry
-	if h.cfg.ModelDigest != "" {
-		digestBytes, err := hex.DecodeString(h.cfg.ModelDigest)
+
+	// Use dynamic model digest from manager if available, else fall back to config.
+	digest := h.cfg.ModelDigest
+	if h.modelMgr != nil {
+		if d := h.modelMgr.ModelDigest(); d != "" {
+			digest = d
+		}
+	}
+
+	if digest != "" {
+		digestBytes, err := hex.DecodeString(digest)
 		if err == nil && len(digestBytes) > 0 {
 			exts = append(exts, entry{
 				OID:   "1.3.6.1.4.1.65230.3.5",

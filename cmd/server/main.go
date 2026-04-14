@@ -9,6 +9,7 @@ import (
 
 	"github.com/privasys/confidential-ai/internal/config"
 	"github.com/privasys/confidential-ai/internal/handler"
+	"github.com/privasys/confidential-ai/internal/models"
 )
 
 func main() {
@@ -18,7 +19,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	h := handler.New(cfg)
+	// Create model manager for dynamic model loading.
+	// If --models-dir points to an existing directory, enable dynamic mode.
+	// Otherwise fall back to legacy mode (vLLM started by entrypoint.sh).
+	var modelMgr *models.Manager
+	if info, err := os.Stat(cfg.ModelsDir); err == nil && info.IsDir() {
+		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort)
+		logJSON("info", "dynamic model loading enabled", map[string]string{
+			"models_dir": cfg.ModelsDir,
+		})
+	} else {
+		logJSON("info", "legacy mode (vLLM managed by entrypoint)", nil)
+	}
+
+	h := handler.New(cfg, modelMgr)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -29,6 +43,7 @@ func main() {
 		"quantization": cfg.Quantization,
 		"gpu":          cfg.GPUType,
 		"tee":          cfg.TeeType,
+		"models_dir":   cfg.ModelsDir,
 	})
 
 	srv := &http.Server{

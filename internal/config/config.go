@@ -9,8 +9,10 @@ import (
 type Config struct {
 	Listen       string // HTTP listen address
 	VLLMUpstream string // vLLM backend URL
-	ModelName    string // model identifier for metadata
-	ModelDigest  string // SHA-256 of model weights index (for attestation OID 3.5)
+	ModelsDir    string // directory containing model subdirectories (e.g. /models)
+	VLLMPort     int    // port for vLLM subprocess (default 8000)
+	ModelName    string // model identifier for metadata (legacy, dynamic in new mode)
+	ModelDigest  string // SHA-256 of model weights index (legacy, dynamic in new mode)
 	Quantization string // quantization method (awq, gptq, fp8, etc.)
 	GPUType      string // GPU hardware identifier
 	ImageDigest  string // CVM image SHA256 digest
@@ -29,6 +31,10 @@ func Parse(args []string) (*Config, error) {
 		"HTTP listen address (env: LISTEN_ADDR)")
 	fs.StringVar(&cfg.VLLMUpstream, "vllm-upstream", envOr("VLLM_UPSTREAM", "http://localhost:8000"),
 		"vLLM backend URL (env: VLLM_UPSTREAM)")
+	fs.StringVar(&cfg.ModelsDir, "models-dir", envOr("MODELS_DIR", "/models"),
+		"Directory containing model subdirectories (env: MODELS_DIR)")
+	fs.IntVar(&cfg.VLLMPort, "vllm-port", 8000,
+		"Port for vLLM subprocess to listen on")
 	fs.StringVar(&cfg.ModelName, "model", envOr("MODEL_NAME", ""),
 		"Model name for reproducibility metadata (env: MODEL_NAME)")
 	fs.StringVar(&cfg.ModelDigest, "model-digest", envOr("MODEL_DIGEST", ""),

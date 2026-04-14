@@ -20,7 +20,7 @@ func TestHealthEndpoint(t *testing.T) {
 		TeeType:      "tdx",
 		VLLMVersion:  "0.19.0",
 		CUDAVersion:  "12.6",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()
@@ -80,7 +80,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		VLLMVersion:  "0.19.0",
 		CUDAVersion:  "12.6",
 		ImageDigest:  "sha256:abc123",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()
@@ -138,7 +138,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 }
 
 func TestMetricsEndpoint(t *testing.T) {
-	h := New(&config.Config{})
+	h := New(&config.Config{}, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -171,7 +171,7 @@ func TestCompletionsEndpoint(t *testing.T) {
 		Quantization: "awq",
 		GPUType:      "H100-80GB",
 		TeeType:      "tdx",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()
@@ -210,7 +210,7 @@ func TestVLLMUpstreamError(t *testing.T) {
 	h := New(&config.Config{
 		VLLMUpstream: vllm.URL,
 		ModelName:    "test-model",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()
@@ -274,7 +274,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 		TeeType:      "tdx",
 		VLLMVersion:  "0.19.0",
 		CUDAVersion:  "13.0",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()
@@ -348,7 +348,7 @@ func TestStreamingErrorPassthrough(t *testing.T) {
 	h := New(&config.Config{
 		VLLMUpstream: vllm.URL,
 		ModelName:    "test-model",
-	})
+	}, nil)
 	h.ready.Store(1)
 
 	mux := http.NewServeMux()

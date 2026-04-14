@@ -1,17 +1,41 @@
 #!/bin/bash
 set -euo pipefail
 
-# --- Model resolution ---------------------------------------------------
-# Accepts MODEL_URL (preferred) or MODEL_NAME (legacy).
+# --- Confidential-AI Entrypoint ------------------------------------------
 #
-#   file:///models/google/gemma-4-31b-it   Local path (pre-loaded on disk)
-#   hf://TOKEN@google/gemma-4-31b-it       HuggingFace with embedded token
-#   hf://google/gemma-4-31b-it             HuggingFace (public or HF_TOKEN env)
-#   google/gemma-4-31b-it                  Plain model name (same as hf://)
+# Two modes:
+#   1. Dynamic model loading (new): Go proxy starts immediately, vLLM is
+#      started on-demand via POST /v1/models/load. Requires MODELS_DIR.
+#   2. Legacy mode: vLLM starts at boot from MODEL_URL/MODEL_NAME, proxy
+#      polls /health until ready. Used by per-model Dockerfiles.
 #
+# The mode is auto-detected: if MODELS_DIR is set and points to a directory
+# with model subdirectories, dynamic mode is used. Otherwise legacy mode.
+
+MODELS_DIR="${MODELS_DIR:-}"
 MODEL_URL="${MODEL_URL:-}"
 MODEL_NAME="${MODEL_NAME:-}"
+PROXY_PORT="${LISTEN_ADDR:-:8080}"
 
+# Reproducibility environment (applies to both modes).
+export VLLM_USE_V1=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+export PYTHONHASHSEED=0
+
+# --- Dynamic mode: just start the Go proxy --------------------------------
+if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
+  echo "[confidential-ai] Dynamic model loading mode (models_dir=$MODELS_DIR)"
+  exec /usr/local/bin/confidential-ai \
+    --listen "$PROXY_PORT" \
+    --models-dir "$MODELS_DIR" \
+    --gpu-type "${GPU_TYPE:-H100-80GB}" \
+    --tee-type "${TEE_TYPE:-tdx}" \
+    --cuda-version "${CUDA_VERSION:-13.0}" \
+    --vllm-version "${VLLM_VERSION:-0.19.0}" \
+    --image-digest "${IMAGE_DIGEST:-}"
+fi
+
+# --- Legacy mode: start vLLM at boot with MODEL_URL/MODEL_NAME -----------
 if [[ -n "$MODEL_URL" ]]; then
   case "$MODEL_URL" in
     file://*)
@@ -34,7 +58,7 @@ if [[ -n "$MODEL_URL" ]]; then
 elif [[ -n "$MODEL_NAME" ]]; then
   MODEL="$MODEL_NAME"
 else
-  echo "[confidential-ai] ERROR: MODEL_URL or MODEL_NAME is required"
+  echo "[confidential-ai] ERROR: MODELS_DIR, MODEL_URL, or MODEL_NAME is required"
   exit 1
 fi
 QUANT="${QUANTIZATION:-}"
@@ -42,9 +66,8 @@ DTYPE="${DTYPE:-auto}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_PORT="${VLLM_PORT:-8000}"
-PROXY_PORT="${LISTEN_ADDR:-:8080}"
 
-echo "[confidential-ai] Starting vLLM for model=$MODEL quantization=$QUANT dtype=$DTYPE"
+echo "[confidential-ai] Legacy mode: starting vLLM for model=$MODEL quantization=$QUANT dtype=$DTYPE"
 
 # Build vLLM args
 VLLM_ARGS=(
@@ -62,8 +85,7 @@ if [[ -n "$QUANT" && "$QUANT" != "none" ]]; then
   VLLM_ARGS+=(--quantization "$QUANT")
 fi
 
-# Start vLLM in the background (V0 engine for reproducibility)
-VLLM_USE_V1=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONHASHSEED=0 \
+# Start vLLM in the background
 vllm serve "$MODEL" "${VLLM_ARGS[@]}" &
 
 VLLM_PID=$!
@@ -83,8 +105,6 @@ for i in $(seq 1 120); do
 done
 
 # --- Compute model identity digest for attestation (OID 3.5) -----------
-# Uses the safetensors index file (lists all weight shards + metadata)
-# as a proxy for the full model identity. Falls back to config.json.
 MODEL_DIGEST=""
 MODEL_DIR="$MODEL"
 
@@ -121,10 +141,6 @@ if [[ "$DISPLAY_NAME" == /models/* ]]; then
   DISPLAY_NAME="${DISPLAY_NAME#/models/}"
 fi
 
-# Start the Go proxy server.
-# The proxy serves /.well-known/attestation-extensions with the model digest
-# (OID 3.5) so the RA-TLS module can pull it at certificate issuance time - the
-# Virtual equivalent of enclave-os-mini's custom_oids() trait.
 echo "[confidential-ai] Starting reproducibility proxy on $PROXY_PORT"
 exec /usr/local/bin/confidential-ai \
   --listen "$PROXY_PORT" \

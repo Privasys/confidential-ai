@@ -30,10 +30,10 @@ COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
 RUN chmod +x /opt/confidential-ai/entrypoint.sh
 
-# Single ai-models volume: the manager bind-mounts /mnt/ai-models to /models.
-# Model subdirectories (e.g. /models/gemma-4-31b-it/) are loaded on-demand
-# via POST /v1/models/load.
-LABEL ai.privasys.volume="/mnt/ai-models:/models:ro"
+# Model disks: GCP persistent disks are auto-mounted at /mnt/model-* by
+# systemd. Bind-mount the whole /mnt into the container so the models
+# manager can discover and load any available model on-demand.
+LABEL ai.privasys.volume="/mnt:/models:ro"
 
 # Dynamic model loading mode: Go proxy starts immediately, vLLM on-demand.
 ENV MODELS_DIR=/models

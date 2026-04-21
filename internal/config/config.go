@@ -47,7 +47,7 @@ func Parse(args []string) (*Config, error) {
 		"CVM image SHA256 digest (env: IMAGE_DIGEST)")
 	fs.StringVar(&cfg.CUDAVersion, "cuda-version", envOr("CUDA_VERSION", "13.0"),
 		"CUDA version (env: CUDA_VERSION)")
-	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.19.0"),
+	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.19.1"),
 		"vLLM version (env: VLLM_VERSION)")
 	fs.StringVar(&cfg.TeeType, "tee-type", envOr("TEE_TYPE", "tdx"),
 		"TEE type: tdx or sev-snp (env: TEE_TYPE)")

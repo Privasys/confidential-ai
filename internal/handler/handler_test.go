@@ -18,7 +18,7 @@ func TestHealthEndpoint(t *testing.T) {
 		Quantization: "awq",
 		GPUType:      "H100-80GB",
 		TeeType:      "tdx",
-		VLLMVersion:  "0.19.0",
+		VLLMVersion:  "0.19.1",
 		CUDAVersion:  "12.6",
 	}, nil)
 	h.ready.Store(1)
@@ -77,7 +77,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		Quantization: "awq",
 		GPUType:      "H100-80GB",
 		TeeType:      "tdx",
-		VLLMVersion:  "0.19.0",
+		VLLMVersion:  "0.19.1",
 		CUDAVersion:  "12.6",
 		ImageDigest:  "sha256:abc123",
 	}, nil)
@@ -111,7 +111,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		"quantization":   "awq",
 		"gpu":            "H100-80GB",
 		"tee_type":       "tdx",
-		"vllm_version":   "0.19.0",
+		"vllm_version":   "0.19.1",
 		"cuda_version":   "12.6",
 		"image_digest":   "sha256:abc123",
 	}
@@ -272,7 +272,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 		Quantization: "none",
 		GPUType:      "H100-80GB",
 		TeeType:      "tdx",
-		VLLMVersion:  "0.19.0",
+		VLLMVersion:  "0.19.1",
 		CUDAVersion:  "13.0",
 	}, nil)
 	h.ready.Store(1)

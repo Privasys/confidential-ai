@@ -35,7 +35,7 @@ Every inference response includes:
     "top_p": 0.95,
     "model": "google/gemma-4-31b-it",
     "quantization": "",
-    "vllm_version": "0.19.0",
+    "vllm_version": "0.19.1",
     "cuda_version": "13.0",
     "gpu": "H100-80GB",
     "tensor_parallel_size": 1,

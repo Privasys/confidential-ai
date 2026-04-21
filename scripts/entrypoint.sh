@@ -31,7 +31,7 @@ if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
     --gpu-type "${GPU_TYPE:-H100-80GB}" \
     --tee-type "${TEE_TYPE:-tdx}" \
     --cuda-version "${CUDA_VERSION:-13.0}" \
-    --vllm-version "${VLLM_VERSION:-0.19.0}" \
+    --vllm-version "${VLLM_VERSION:-0.19.1}" \
     --image-digest "${IMAGE_DIGEST:-}"
 fi
 

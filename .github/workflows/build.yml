@@ -87,10 +87,10 @@ jobs:
     name: Build model overlay images
     runs-on: ubuntu-24.04
     needs: docker
-    # Per-model overlays are needed for the legacy MODEL_URL boot path used
-    # by some e2e tests. Build on every push to main so they stay in sync
-    # with the base image.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Manual-only: per-model overlays are needed for the legacy MODEL_URL boot
+    # path used by some e2e tests. Trigger via workflow_dispatch when the base
+    # image changes or a model overlay needs republishing.
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         model:

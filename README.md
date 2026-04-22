@@ -97,7 +97,9 @@ on every push to `main`.
 
 ### GCP Confidential VM (a3-highgpu-1g, TDX)
 
-See `.operations/confidential-ai.md` for full deployment plan and `deploy/` for scripts.
+The images run on the [Privasys Enclave OS Virtual](https://github.com/Privasys/enclave-os-virtual)
+with TDX-attested confidential GPU support. See the `deploy/` directory in
+this repository for the GCP deployment scripts.
 
 ## API
 

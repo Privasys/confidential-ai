@@ -19,6 +19,20 @@ type Config struct {
 	CUDAVersion  string // CUDA version string
 	VLLMVersion  string // vLLM version string
 	TeeType      string // TEE type: tdx, sev-snp
+
+	// RoothashDir is the directory written by disk-mounter on the host
+	// containing per-model dm-verity root hashes (one file per model,
+	// named <model>.roothash). When a load request resolves to a model
+	// whose roothash file is present, the proxy publishes that root
+	// hash as the OID 3.5 (MODEL_DIGEST) attestation extension instead
+	// of hashing the safetensors index.
+	RoothashDir string
+
+	// LoadToken, when non-empty, is required as Bearer credential on
+	// POST /v1/models/load and POST /v1/models/unload. Issued to the
+	// fleet manager / orchestrator only. When empty, the endpoints
+	// remain open (legacy / dev mode).
+	LoadToken string
 }
 
 // Parse reads configuration from flags and environment, returning it.
@@ -51,6 +65,10 @@ func Parse(args []string) (*Config, error) {
 		"vLLM version (env: VLLM_VERSION)")
 	fs.StringVar(&cfg.TeeType, "tee-type", envOr("TEE_TYPE", "tdx"),
 		"TEE type: tdx or sev-snp (env: TEE_TYPE)")
+	fs.StringVar(&cfg.RoothashDir, "roothash-dir", envOr("ROOTHASH_DIR", "/var/lib/enclave-os/model-roothashes"),
+		"Directory of per-model dm-verity root hashes (env: ROOTHASH_DIR)")
+	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
+		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

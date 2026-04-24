@@ -53,8 +53,9 @@ type Status struct {
 
 // Manager manages the vLLM subprocess lifecycle.
 type Manager struct {
-	modelsDir string // path to model directory (e.g. /models)
-	vllmPort  int    // port for vLLM to listen on
+	modelsDir   string // path to model directory (e.g. /models)
+	vllmPort    int    // port for vLLM to listen on
+	roothashDir string // directory of <model>.roothash files written by disk-mounter
 
 	mu           sync.RWMutex
 	state        State
@@ -70,11 +71,12 @@ type Manager struct {
 }
 
 // NewManager creates a new model manager.
-func NewManager(modelsDir string, vllmPort int) *Manager {
+func NewManager(modelsDir string, vllmPort int, roothashDir string) *Manager {
 	return &Manager{
-		modelsDir: modelsDir,
-		vllmPort:  vllmPort,
-		state:     StateIdle,
+		modelsDir:   modelsDir,
+		vllmPort:    vllmPort,
+		roothashDir: roothashDir,
+		state:       StateIdle,
 	}
 }
 
@@ -303,8 +305,13 @@ func (m *Manager) doLoad(req LoadRequest) {
 		return
 	}
 
-	// Compute model digest.
-	digest := m.computeDigest(modelPath)
+	// Compute model digest. Prefer the dm-verity root hash from the
+	// model disk (covers every byte the kernel will ever serve) over
+	// the legacy index-file hash (covers only the index json).
+	digest := m.lookupVerityRoothash(req.Model)
+	if digest == "" {
+		digest = m.computeDigest(modelPath)
+	}
 
 	// Derive display name.
 	displayName := req.Model
@@ -410,6 +417,37 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 		time.Sleep(5 * time.Second)
 	}
 	return fmt.Errorf("vLLM not ready after 10 minutes")
+}
+
+// lookupVerityRoothash returns the dm-verity root hash for the given model
+// if disk-mounter has published one to <RoothashDir>/<basename>.roothash.
+// The basename is derived from the request model identifier ("gemma4",
+// "/models/gemma4", or "google/gemma-4-31b-it" all map to a sensible
+// filename). Returns the empty string when no roothash is available, in
+// which case the caller falls back to the legacy index-file hash.
+func (m *Manager) lookupVerityRoothash(model string) string {
+	if m.roothashDir == "" || model == "" {
+		return ""
+	}
+	name := filepath.Base(strings.TrimSuffix(model, "/"))
+	if name == "" || name == "." || name == "/" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(m.roothashDir, name+".roothash"))
+	if err != nil {
+		return ""
+	}
+	hash := strings.TrimSpace(string(data))
+	// Sanity-check: hex, 40-128 chars (sha1 .. sha512).
+	if l := len(hash); l < 40 || l > 128 || l%2 != 0 {
+		return ""
+	}
+	for _, c := range hash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return ""
+		}
+	}
+	return hash
 }
 
 // computeDigest computes a SHA-256 digest from the model's identity file.

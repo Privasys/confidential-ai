@@ -83,9 +83,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("GET /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models", h.models)
-	mux.HandleFunc("POST /v1/models/load", h.modelsLoad)
+	mux.HandleFunc("POST /v1/models/load", h.requireLoadToken(h.modelsLoad))
 	mux.HandleFunc("GET /v1/models/status", h.modelsStatus)
-	mux.HandleFunc("POST /v1/models/unload", h.modelsUnload)
+	mux.HandleFunc("POST /v1/models/unload", h.requireLoadToken(h.modelsUnload))
 	mux.HandleFunc("GET /readiness", h.readiness)
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("POST /health", h.health)
@@ -93,6 +93,43 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /healthz", h.health)
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /metrics", h.metrics)
+}
+
+// requireLoadToken gates a handler behind the static load token defined in
+// config.LoadToken. When LoadToken is empty the handler is reachable
+// without authentication (legacy / dev). When set, callers must present
+// `Authorization: Bearer <LoadToken>`. The fleet manager / orchestrator
+// holds this token; end users never do.
+func (h *Handler) requireLoadToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.cfg.LoadToken == "" {
+			next(w, r)
+			return
+		}
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
+		token := strings.TrimPrefix(authz, "Bearer ")
+		if subtleEq(token, h.cfg.LoadToken) {
+			next(w, r)
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "invalid token")
+	}
+}
+
+// subtleEq is a constant-time string comparison.
+func subtleEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
 }
 
 // chatCompletions proxies to vLLM /v1/chat/completions and injects
@@ -457,7 +494,14 @@ func (h *Handler) modelsUnload(w http.ResponseWriter, _ *http.Request) {
 // method: the container declares its own attestation OIDs, and Caddy's RA-TLS
 // module pulls them at certificate issuance time.
 //
-// Currently serves OID 3.5 (model digest) when a model digest is configured.
+// Serves OID 1.3.6.1.4.1.65230.3.5 (MODEL_DIGEST) when a model digest is
+// available. The digest is sourced, in order of preference:
+//
+//  1. The dm-verity root hash of the mounted model disk
+//     (<RoothashDir>/<model>.roothash, written by disk-mounter).
+//  2. The dynamic digest computed by the model manager from the
+//     safetensors index (legacy fallback).
+//  3. The static --model-digest config value.
 func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) {
 	type entry struct {
 		OID   string `json:"oid"`

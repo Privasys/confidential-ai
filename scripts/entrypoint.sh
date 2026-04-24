@@ -28,6 +28,8 @@ if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
   exec /usr/local/bin/confidential-ai \
     --listen "$PROXY_PORT" \
     --models-dir "$MODELS_DIR" \
+    --roothash-dir "${ROOTHASH_DIR:-/var/lib/enclave-os/model-roothashes}" \
+    --load-token "${LOAD_TOKEN:-}" \
     --gpu-type "${GPU_TYPE:-H100-80GB}" \
     --tee-type "${TEE_TYPE:-tdx}" \
     --cuda-version "${CUDA_VERSION:-13.0}" \

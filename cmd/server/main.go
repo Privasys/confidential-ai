@@ -24,7 +24,7 @@ func main() {
 	// Otherwise fall back to legacy mode (vLLM started by entrypoint.sh).
 	var modelMgr *models.Manager
 	if info, err := os.Stat(cfg.ModelsDir); err == nil && info.IsDir() {
-		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort)
+		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort, cfg.RoothashDir)
 		logJSON("info", "dynamic model loading enabled", map[string]string{
 			"models_dir": cfg.ModelsDir,
 		})

@@ -58,6 +58,11 @@ Model weights are downloaded at runtime from HuggingFace. For gated models, set
 
 ## Reproducibility
 
-All model configs use vLLM V0 engine with `--enforce-eager` and `--seed 0` for
-deterministic output on the same hardware. See the main README for details on
-the reproducibility protocol.
+vLLM is started with `--seed 0`, CUDA graphs enabled, the V1 scheduler,
+`--no-enable-chunked-prefill`, and `--max-num-batched-tokens` sized to fit
+any prompt in a single prefill step. Combined with the locked kernel /
+NVIDIA driver / CUDA / vLLM versions and `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
+this gives deterministic output for serialised requests on the same
+hardware. Per-request determinism under concurrent traffic still requires
+batch-invariant kernels (tracked separately). See the main README for the
+full reproducibility protocol.

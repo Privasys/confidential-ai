@@ -18,7 +18,16 @@ MODEL_NAME="${MODEL_NAME:-}"
 PROXY_PORT="${LISTEN_ADDR:-:8080}"
 
 # Reproducibility environment (applies to both modes).
-export VLLM_USE_V1=0
+#
+# CUBLAS_WORKSPACE_CONFIG is required by PyTorch's deterministic
+# algorithms path under CUDA >= 10.2; PYTHONHASHSEED removes the
+# only source of Python-level non-determinism we care about.
+#
+# VLLM_USE_V1 is intentionally NOT set here. We used to force V0
+# for batch-invariance, but V0 leaves the H100 tensor cores idle.
+# Determinism on V1 is preserved by disabling chunked prefill
+# (see --no-enable-chunked-prefill below) and sizing
+# --max-num-batched-tokens so any prompt fits in a single prefill.
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 
@@ -71,11 +80,24 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 
 echo "[confidential-ai] Legacy mode: starting vLLM for model=$MODEL quantization=$QUANT dtype=$DTYPE"
 
-# Build vLLM args
+# Build vLLM args. CUDA graphs ENABLED (no --enforce-eager) and
+# V1 scheduler ENABLED (default), with chunked prefill OFF and the
+# batched-token budget sized so any prompt up to --max-model-len
+# is processed in one mathematical block. See manager.go for
+# the full reproducibility rationale.
+BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+if [[ -z "$BATCHED_TOKENS" ]]; then
+  BATCHED_TOKENS=$((MAX_MODEL_LEN * 2))
+  if (( BATCHED_TOKENS < 16384 )); then
+    BATCHED_TOKENS=16384
+  fi
+fi
+
 VLLM_ARGS=(
   --seed 0
   --tensor-parallel-size 1
-  --enforce-eager
+  --no-enable-chunked-prefill
+  --max-num-batched-tokens "$BATCHED_TOKENS"
   --no-enable-log-requests
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "$GPU_MEM"

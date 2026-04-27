@@ -257,12 +257,47 @@ func (m *Manager) doLoad(req LoadRequest) {
 	servedName := strings.TrimPrefix(req.Model, "/models/")
 
 	// Build vLLM command.
+	//
+	// Reproducibility tradeoffs we accept:
+	//
+	//   * CUDA graphs ENABLED (no --enforce-eager). Graph capture +
+	//     replay is itself deterministic: same kernel DAG, same
+	//     memory offsets, same streams. Eager mode was costing ~30x
+	//     throughput for no determinism gain in our locked
+	//     environment (pinned kernel, NVIDIA driver, CUDA, vLLM
+	//     version, model digest).
+	//
+	//   * V1 engine ENABLED (no VLLM_USE_V1=0 env). The legacy V0
+	//     scheduler underutilises the H100 tensor cores; V1 was
+	//     historically avoided for reproducibility because of
+	//     chunked prefill (which can change the order of FP
+	//     reductions across prefill chunks), so we explicitly turn
+	//     chunked prefill off below and size the batch budget so
+	//     any prompt up to --max-model-len fits in a single
+	//     mathematical block.
+	//
+	//   * --max-num-batched-tokens is set to max(16384, 2*max-model-len)
+	//     so the entire prompt is processed in one prefill step
+	//     (no inter-chunk reductions).
+	//
+	// What this still does NOT guarantee: batch-invariance. With
+	// continuous batching, two concurrent requests may see
+	// different reductions across the batch dimension. Determinism
+	// holds per-request when traffic is serialised; for true
+	// concurrent determinism we need batch-invariant kernels
+	// (FlashInfer / vLLM batch-invariant attention), tracked
+	// separately.
+	batchedTokens := req.MaxModelLen * 2
+	if batchedTokens < 16384 {
+		batchedTokens = 16384
+	}
 	args := []string{
 		"serve", modelPath,
 		"--served-model-name", servedName,
 		"--seed", "0",
 		"--tensor-parallel-size", "1",
-		"--enforce-eager",
+		"--no-enable-chunked-prefill",
+		"--max-num-batched-tokens", fmt.Sprintf("%d", batchedTokens),
 		"--no-enable-log-requests",
 		"--max-model-len", fmt.Sprintf("%d", req.MaxModelLen),
 		"--gpu-memory-utilization", fmt.Sprintf("%.2f", req.GPUMemoryUtilization),
@@ -275,9 +310,13 @@ func (m *Manager) doLoad(req LoadRequest) {
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
 	cmd.Env = append(os.Environ(),
-		"VLLM_USE_V1=0",
+		// Force PyTorch / cuBLAS into deterministic-workspace mode.
+		// Required for torch.use_deterministic_algorithms() under
+		// CUDA >= 10.2; vLLM picks this up via PyTorch.
 		"CUBLAS_WORKSPACE_CONFIG=:4096:8",
 		"PYTHONHASHSEED=0",
+		// VLLM_USE_V1 intentionally NOT set: defaults to V1 in
+		// vLLM >= 0.19, which is what we want for throughput.
 	)
 
 	// Pipe stderr for progress tracking.

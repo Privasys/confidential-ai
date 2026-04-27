@@ -199,20 +199,14 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Rewrite the request body's `model` field to whatever vLLM is
-	// actually serving. Only one model is loaded at a time on a given
-	// enclave, so the client-supplied name is informational; it lets
-	// chat UIs send friendly aliases ("gemma4") regardless of how the
-	// model was registered or how vLLM names it internally. The actual
-	// model used is always reported back via the reproducibility
-	// metadata so callers can verify what they got.
-	if h.modelMgr != nil {
-		if loaded := h.modelMgr.ModelName(); loaded != "" {
-			if rewritten, rerr := rewriteModelField(reqWithSeed, loaded); rerr == nil {
-				reqWithSeed = rewritten
-			}
-		}
-	}
+	// The `model` field is forwarded verbatim. The proxy never silently
+	// rewrites it: callers are expected to send the canonical name that
+	// vLLM is serving (which is exactly what `GET /v1/models` and the
+	// management-service instance discovery endpoint publish). If the
+	// name does not match what vLLM has loaded, vLLM returns its own
+	// 404 - that is the correct behaviour, since silently switching the
+	// model would invalidate the reproducibility metadata that this
+	// endpoint promises.
 
 	// Forward to vLLM
 	upstream := h.cfg.VLLMUpstream + path
@@ -579,20 +573,6 @@ func injectSeed(body []byte, seed int64) ([]byte, error) {
 	if _, ok := m["seed"]; !ok {
 		m["seed"] = seed
 	}
-	return json.Marshal(m)
-}
-
-// rewriteModelField overwrites the "model" field of a JSON request body
-// with the given name. Used so the proxy can normalise client-supplied
-// aliases (e.g. "gemma4") to whatever vLLM is actually serving on this
-// enclave. Returns the original body unchanged if it is not a JSON
-// object.
-func rewriteModelField(body []byte, model string) ([]byte, error) {
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return body, err
-	}
-	m["model"] = model
 	return json.Marshal(m)
 }
 

@@ -105,6 +105,16 @@ VLLM_ARGS=(
   --port "$VLLM_PORT"
 )
 
+# SERVED_MODEL_NAME pins the canonical id vLLM exposes (so chat
+# clients and reproducibility metadata see a friendly short name
+# instead of a filesystem path). Defaults to MODEL_NAME for
+# backwards compatibility, then falls back to whatever vLLM picks
+# from the model path.
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-${MODEL_NAME:-}}"
+if [[ -n "$SERVED_MODEL_NAME" ]]; then
+  VLLM_ARGS+=(--served-model-name "$SERVED_MODEL_NAME")
+fi
+
 if [[ -n "$QUANT" && "$QUANT" != "none" ]]; then
   VLLM_ARGS+=(--quantization "$QUANT")
 fi

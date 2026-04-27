@@ -32,8 +32,20 @@ const (
 )
 
 // LoadRequest is the body of POST /v1/models/load.
+//
+// `Model` is the canonical served name. It is what vLLM will register
+// (`--served-model-name`), what `GET /v1/models` reports, and what every
+// chat-completions request must put in its `model` field. The proxy never
+// rewrites client-supplied names; the orchestrator is expected to publish
+// the same string in its instance discovery API.
+//
+// `Source` is an optional loader hint: a filesystem path or a HuggingFace
+// repo. When empty it defaults to `Model` resolved against modelsDir.
+// This split lets the served name stay friendly ("gemma4-31b") even when
+// the on-disk path is awkward ("/models/gemma-4-31b-it").
 type LoadRequest struct {
-	Model                 string  `json:"model"`                            // directory name under /models, or HF repo
+	Model                 string  `json:"model"`                            // canonical served name (required)
+	Source                string  `json:"source,omitempty"`                 // optional loader hint: path or HF repo
 	Dtype                 string  `json:"dtype,omitempty"`                  // default "auto"
 	Quantization          string  `json:"quantization,omitempty"`           // awq, gptq, int4, etc.
 	MaxModelLen           int     `json:"max_model_len,omitempty"`          // default 8192
@@ -245,16 +257,15 @@ func (m *Manager) doLoad(req LoadRequest) {
 		m.mu.Unlock()
 	}()
 
-	// Resolve model path.
-	modelPath := m.resolveModelPath(req.Model)
-
-	// Friendly served-model-name so /v1/models and request bodies don't
-	// need to know the on-disk path. We strip a leading /models/ if the
-	// caller already gave us a path, and otherwise use the request as-is
-	// (e.g. "gemma4-31b" or "google/gemma-4-31b-it"). The proxy layer
-	// rewrites incoming request `model` fields to this name as well, so
-	// any reasonable alias the client sends will resolve.
-	servedName := strings.TrimPrefix(req.Model, "/models/")
+	// Resolve model path. Source overrides Model when present, so the
+	// served name (the canonical id reported back to clients) can be
+	// short and friendly while the loader still finds the on-disk
+	// safetensors directory.
+	loaderID := req.Source
+	if loaderID == "" {
+		loaderID = req.Model
+	}
+	modelPath := m.resolveModelPath(loaderID)
 
 	// Build vLLM command.
 	//
@@ -293,7 +304,7 @@ func (m *Manager) doLoad(req LoadRequest) {
 	}
 	args := []string{
 		"serve", modelPath,
-		"--served-model-name", servedName,
+		"--served-model-name", req.Model,
 		"--seed", "0",
 		"--tensor-parallel-size", "1",
 		"--no-enable-chunked-prefill",
@@ -355,21 +366,18 @@ func (m *Manager) doLoad(req LoadRequest) {
 
 	// Compute model digest. Prefer the dm-verity root hash from the
 	// model disk (covers every byte the kernel will ever serve) over
-	// the legacy index-file hash (covers only the index json).
-	digest := m.lookupVerityRoothash(req.Model)
+	// the legacy index-file hash (covers only the index json). The
+	// roothash filename is keyed off the loader id (Source or Model),
+	// not the served name, because that is what the disk-mounter
+	// actually mounts.
+	digest := m.lookupVerityRoothash(loaderID)
 	if digest == "" {
 		digest = m.computeDigest(modelPath)
 	}
 
-	// Derive display name.
-	displayName := req.Model
-	if strings.HasPrefix(displayName, "/models/") {
-		displayName = strings.TrimPrefix(displayName, "/models/")
-	}
-
 	m.mu.Lock()
 	m.state = StateReady
-	m.model = displayName
+	m.model = req.Model
 	m.modelDigest = digest
 	m.progress = 1.0
 	m.message = "Model loaded and serving"

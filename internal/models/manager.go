@@ -248,9 +248,18 @@ func (m *Manager) doLoad(req LoadRequest) {
 	// Resolve model path.
 	modelPath := m.resolveModelPath(req.Model)
 
+	// Friendly served-model-name so /v1/models and request bodies don't
+	// need to know the on-disk path. We strip a leading /models/ if the
+	// caller already gave us a path, and otherwise use the request as-is
+	// (e.g. "gemma4-31b" or "google/gemma-4-31b-it"). The proxy layer
+	// rewrites incoming request `model` fields to this name as well, so
+	// any reasonable alias the client sends will resolve.
+	servedName := strings.TrimPrefix(req.Model, "/models/")
+
 	// Build vLLM command.
 	args := []string{
 		"serve", modelPath,
+		"--served-model-name", servedName,
 		"--seed", "0",
 		"--tensor-parallel-size", "1",
 		"--enforce-eager",

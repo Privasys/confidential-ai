@@ -33,6 +33,18 @@ type Config struct {
 	// fleet manager / orchestrator only. When empty, the endpoints
 	// remain open (legacy / dev mode).
 	LoadToken string
+
+	// MCPServers, when non-empty, enables the agentic tool-call loop
+	// on POST /v1/chat/completions. Format (env MCP_SERVERS):
+	//
+	//   name1=https://url1[?bearer=1],name2=https://url2,...
+	//
+	// `bearer=1` opts the server in to receiving the user's
+	// Authorization header from the original chat request (required
+	// for private-rag, optional for stateless tools like lightpanda).
+	// When MCPServers is empty the proxy behaves exactly as before
+	// (pure pass-through to vLLM).
+	MCPServers string
 }
 
 // Parse reads configuration from flags and environment, returning it.
@@ -69,6 +81,8 @@ func Parse(args []string) (*Config, error) {
 		"Directory of per-model dm-verity root hashes (env: ROOTHASH_DIR)")
 	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
 		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
+	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
+		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

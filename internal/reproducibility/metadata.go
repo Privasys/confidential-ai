@@ -24,6 +24,22 @@ type Metadata struct {
 	ImageDigest        string  `json:"image_digest,omitempty"`
 	TeeType            string  `json:"tee_type"`
 	Timestamp          string  `json:"timestamp"`
+
+	// ToolCalls, when non-nil, lists the MCP tool invocations that
+	// served this response (populated by the agentic loop). Each entry
+	// is a compact descriptor: {name, status, duration_ms, error?}.
+	// Unset for non-agentic completions.
+	ToolCalls []ToolCallSummary `json:"tool_calls,omitempty"`
+}
+
+// ToolCallSummary is the per-tool entry surfaced in the reproducibility
+// block so a verifier can replay the conversation and check both the
+// model AND the retrieval boundary.
+type ToolCallSummary struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms"`
+	Error      string `json:"error,omitempty"`
 }
 
 // NewMetadata creates reproducibility metadata from request parameters

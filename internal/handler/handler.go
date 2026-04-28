@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/privasys/confidential-ai/internal/agent"
 	"github.com/privasys/confidential-ai/internal/config"
 	"github.com/privasys/confidential-ai/internal/models"
 	"github.com/privasys/confidential-ai/internal/reproducibility"
@@ -24,6 +26,12 @@ type Handler struct {
 	cfg    *config.Config
 	client *http.Client
 	modelMgr *models.Manager
+
+	// agentCatalog + agentDispatcher are non-nil when MCPServers is set
+	// in config. When set, /v1/chat/completions runs through the
+	// agentic loop instead of a straight pass-through.
+	agentCatalog    *agent.Catalog
+	agentDispatcher *agent.Dispatcher
 
 	// ready is set to 1 once the vLLM upstream health check succeeds.
 	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
@@ -47,6 +55,13 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	// Legacy mode: poll vLLM health at startup if model manager is not used.
 	if modelMgr == nil && cfg.ModelName != "" {
 		go h.pollUpstreamReady()
+	}
+	if servers, err := agent.ParseServerSpec(cfg.MCPServers); err != nil {
+		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", err)
+	} else if len(servers) > 0 {
+		h.agentCatalog = agent.NewCatalog(servers, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
+		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, &http.Client{Timeout: 60 * time.Second})
+		log.Printf("[agent] enabled with %d MCP server(s)", len(servers))
 	}
 	return h
 }
@@ -135,6 +150,10 @@ func subtleEq(a, b string) bool {
 // chatCompletions proxies to vLLM /v1/chat/completions and injects
 // reproducibility metadata into the response.
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	if h.agentDispatcher != nil {
+		h.chatCompletionsAgentic(w, r)
+		return
+	}
 	h.proxyWithReproducibility(w, r, "/v1/chat/completions")
 }
 

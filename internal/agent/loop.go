@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 )
 
 // MaxIterations bounds the tool-call loop. A model that keeps calling
@@ -284,5 +286,93 @@ func InjectTools(body []byte, tools []Tool) ([]byte, error) {
 	if _, ok := req["tool_choice"]; !ok {
 		req["tool_choice"] = "auto"
 	}
+
+	// Nudge the model with a short system message describing the available
+	// tools and, when the user's last message contains a URL, explicitly
+	// instruct it to call a fetch/browse tool first. This is needed because
+	// smaller open-weight models (Gemma, Llama) often ignore the OpenAI
+	// `tools` array unless the policy is reinforced in the prompt itself.
+	if msgs, ok := req["messages"].([]any); ok {
+		nudge := buildToolNudge(existing, msgs)
+		if nudge != "" {
+			// If a system message already exists at index 0, append; else prepend.
+			if len(msgs) > 0 {
+				if first, ok := msgs[0].(map[string]any); ok {
+					if role, _ := first["role"].(string); role == "system" {
+						if c, _ := first["content"].(string); c != "" {
+							first["content"] = c + "\n\n" + nudge
+						} else {
+							first["content"] = nudge
+						}
+						msgs[0] = first
+						req["messages"] = msgs
+						return json.Marshal(req)
+					}
+				}
+			}
+			req["messages"] = append([]any{map[string]any{"role": "system", "content": nudge}}, msgs...)
+		}
+	}
 	return json.Marshal(req)
+}
+
+var urlRegex = regexp.MustCompile(`https?://[^\s<>"')]+`)
+
+// buildToolNudge returns a system-message snippet describing the available
+// tools and, when the user's last message contains a URL, demanding that
+// the model call a fetch/browse-style tool before answering.
+func buildToolNudge(toolsArr []any, msgs []any) string {
+	if len(toolsArr) == 0 {
+		return ""
+	}
+	type toolSummary struct{ name, desc string }
+	var summaries []toolSummary
+	var fetchTool string
+	for _, t := range toolsArr {
+		m, _ := t.(map[string]any)
+		fn, _ := m["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		desc, _ := fn["description"].(string)
+		if name == "" {
+			continue
+		}
+		summaries = append(summaries, toolSummary{name, desc})
+		lname := strings.ToLower(name)
+		ldesc := strings.ToLower(desc)
+		if fetchTool == "" && (strings.Contains(lname, "browse") || strings.Contains(lname, "fetch") ||
+			strings.Contains(lname, "http") || strings.Contains(ldesc, "fetch") || strings.Contains(ldesc, "browse") ||
+			strings.Contains(ldesc, "web page") || strings.Contains(ldesc, "url")) {
+			fetchTool = name
+		}
+	}
+	if len(summaries) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("You have access to the following tools. Call them whenever they help answer the user's request.\n")
+	for _, s := range summaries {
+		fmt.Fprintf(&sb, "- %s: %s\n", s.name, s.desc)
+	}
+
+	// Look at the last user message for URLs.
+	var lastUserText string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m, _ := msgs[i].(map[string]any)
+		if role, _ := m["role"].(string); role == "user" {
+			if c, ok := m["content"].(string); ok {
+				lastUserText = c
+			}
+			break
+		}
+	}
+	if fetchTool != "" && lastUserText != "" {
+		urls := urlRegex.FindAllString(lastUserText, -1)
+		if len(urls) > 0 {
+			fmt.Fprintf(&sb, "\nThe user's message contains the following URL(s): %s. "+
+				"You MUST call the `%s` tool to fetch the page contents before answering. "+
+				"Do not rely on prior knowledge about these URLs; their content may have changed.",
+				strings.Join(urls, ", "), fetchTool)
+		}
+	}
+	return sb.String()
 }

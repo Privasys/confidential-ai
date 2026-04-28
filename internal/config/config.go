@@ -45,6 +45,12 @@ type Config struct {
 	// When MCPServers is empty the proxy behaves exactly as before
 	// (pure pass-through to vLLM).
 	MCPServers string
+
+	// CORSOrigins is a comma-separated allowlist of HTTP Origins that
+	// receive Access-Control-Allow-* response headers. Defaults to the
+	// Privasys chat front-ends. Empty disables CORS entirely (browser
+	// requests from any origin will be blocked by the SOP).
+	CORSOrigins string
 }
 
 // Parse reads configuration from flags and environment, returning it.
@@ -83,6 +89,8 @@ func Parse(args []string) (*Config, error) {
 		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
+	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat-test.privasys.org,http://localhost:4210,http://localhost:3000"),
+		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

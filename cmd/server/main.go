@@ -48,7 +48,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         cfg.Listen,
-		Handler:      mux,
+		Handler:      handler.CORS(cfg.CORSOrigins, mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 10 * time.Minute, // LLM inference can be slow
 		IdleTimeout:  120 * time.Second,

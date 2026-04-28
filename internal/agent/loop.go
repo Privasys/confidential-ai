@@ -31,6 +31,15 @@ type LoopOptions struct {
 	// Required. The implementation is provided by the handler layer
 	// (it has the live http.Client + upstream URL).
 	Invoke func(ctx context.Context, body []byte) ([]byte, error)
+
+	// WaitConsent, if non-nil, is called BEFORE dispatching any tool
+	// flagged with RequiresUserConfirmation. It blocks until the
+	// front-end answers (via the confirm endpoint) or the context is
+	// cancelled. When it returns allowed=false the call is short-
+	// circuited with a synthetic "user_denied" tool result that is
+	// fed back into the model so it can recover (apologise / try
+	// something else). Errors are surfaced the same way.
+	WaitConsent func(ctx context.Context, callID, name string, args []byte) (allowed bool, err error)
 }
 
 // Run executes the agentic loop on the given chat completion request.
@@ -92,6 +101,10 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 
 		// Dispatch each tool call serially. Parallelism is a follow-up.
 		for _, tc := range toolCalls {
+			requiresConfirm := false
+			if t, ok := dispatcher.catalog.Tool(tc.Function.Name); ok && t.RequiresUserConfirmation {
+				requiresConfirm = true
+			}
 			if opt.EmitEvent != nil {
 				ev := map[string]any{
 					"id":   tc.ID,
@@ -101,10 +114,47 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 				// Surface the catalogue's "requires_user_confirmation"
 				// flag so the front-end can mark the card as a
 				// privileged action (write tools, send-email, etc.).
-				if t, ok := dispatcher.catalog.Tool(tc.Function.Name); ok && t.RequiresUserConfirmation {
+				if requiresConfirm {
 					ev["requires_confirmation"] = true
 				}
 				opt.EmitEvent("tool_call", ev)
+			}
+
+			// Block-and-await consent for write-capable tools when the
+			// caller wired a WaitConsent callback. If the user denies
+			// (or the wait fails) we feed a synthetic error back to
+			// the model instead of executing the tool.
+			if requiresConfirm && opt.WaitConsent != nil {
+				if opt.EmitEvent != nil {
+					opt.EmitEvent("tool_confirm_request", map[string]any{
+						"id":   tc.ID,
+						"name": tc.Function.Name,
+						"args": tc.Function.Arguments,
+					})
+				}
+				allowed, werr := opt.WaitConsent(ctx, tc.ID, tc.Function.Name, []byte(tc.Function.Arguments))
+				if werr != nil || !allowed {
+					reason := "user_denied"
+					if werr != nil {
+						reason = werr.Error()
+					}
+					denied := ToolResult{
+						Name:   tc.Function.Name,
+						Status: "error",
+						Error:  reason,
+					}
+					allResults = append(allResults, denied)
+					if opt.EmitEvent != nil {
+						opt.EmitEvent("tool_result", denied)
+					}
+					messages = append(messages, map[string]any{
+						"role":         "tool",
+						"tool_call_id": tc.ID,
+						"name":         tc.Function.Name,
+						"content":      denied.AsToolMessageContent(),
+					})
+					continue
+				}
 			}
 
 			args := json.RawMessage(tc.Function.Arguments)

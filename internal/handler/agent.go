@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/privasys/confidential-ai/internal/agent"
 	"github.com/privasys/confidential-ai/internal/reproducibility"
@@ -109,6 +110,18 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		EmitEvent: emit,
 		Invoke: func(ctx context.Context, b []byte) ([]byte, error) {
 			return h.callVLLM(ctx, b)
+		},
+		WaitConsent: func(ctx context.Context, callID, name string, args []byte) (bool, error) {
+			if h.agentConsent == nil {
+				// Consent registry not initialised; default to allow so
+				// existing behaviour is preserved.
+				return true, nil
+			}
+			dec, werr := h.agentConsent.Wait(ctx, callID, 2*time.Minute)
+			if werr != nil {
+				return false, werr
+			}
+			return dec.Allowed, nil
 		},
 	})
 	if err != nil {

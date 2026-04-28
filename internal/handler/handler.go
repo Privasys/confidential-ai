@@ -32,6 +32,7 @@ type Handler struct {
 	// agentic loop instead of a straight pass-through.
 	agentCatalog    *agent.Catalog
 	agentDispatcher *agent.Dispatcher
+	agentConsent    *agent.ConsentRegistry
 
 	// ready is set to 1 once the vLLM upstream health check succeeds.
 	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
@@ -61,6 +62,7 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	} else if len(servers) > 0 {
 		h.agentCatalog = agent.NewCatalog(servers, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
 		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, &http.Client{Timeout: 60 * time.Second})
+		h.agentConsent = agent.NewConsentRegistry()
 		log.Printf("[agent] enabled with %d MCP server(s)", len(servers))
 	}
 	return h
@@ -108,6 +110,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /healthz", h.health)
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /metrics", h.metrics)
+	mux.HandleFunc("POST /v1/agent/confirm/{id}", h.agentConfirm)
 }
 
 // requireLoadToken gates a handler behind the static load token defined in

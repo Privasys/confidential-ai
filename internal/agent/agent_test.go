@@ -291,3 +291,69 @@ func TestRun_BoundedIterations(t *testing.T) {
 		t.Fatalf("expected 3 tool results, got %d", len(results))
 	}
 }
+
+func TestRun_WaitConsentDenied(t *testing.T) {
+f := &fakeMCP{
+tools: []Tool{{Name: "send_email", RequiresUserConfirmation: true}},
+answer: func(string, []byte, string) (int, []byte) {
+t.Fatalf("dispatcher should NOT be called when consent is denied")
+return 200, nil
+},
+}
+srv := httptest.NewServer(f.handler())
+defer srv.Close()
+cat := NewCatalog([]Server{{Name: "mail", BaseURL: srv.URL}}, nil, time.Hour)
+cat.Tools(context.Background())
+d := NewDispatcher(cat, nil)
+
+events := []string{}
+calls := 0
+body := []byte(`{"model":"m","messages":[{"role":"user","content":"send mail"}]}`)
+_, results, err := Run(context.Background(), d, body, LoopOptions{
+EmitEvent: func(name string, _ any) { events = append(events, name) },
+WaitConsent: func(ctx context.Context, callID, name string, args []byte) (bool, error) {
+if callID != "t1" || name != "mail__send_email" {
+t.Errorf("unexpected consent: id=%s name=%s", callID, name)
+}
+return false, nil
+},
+Invoke: func(ctx context.Context, b []byte) ([]byte, error) {
+calls++
+if calls == 1 {
+return []byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"t1","type":"function","function":{"name":"mail__send_email","arguments":"{\"to\":\"x@y\"}"}}]}}]}`), nil
+}
+// Second call MUST contain a tool message with the denial error.
+var req map[string]any
+json.Unmarshal(b, &req)
+msgs := req["messages"].([]any)
+last := msgs[len(msgs)-1].(map[string]any)
+if last["role"] != "tool" {
+t.Fatalf("expected tool message, got %+v", last)
+}
+content, _ := last["content"].(string)
+if !strings.Contains(content, "user_denied") {
+t.Fatalf("expected user_denied in tool content, got %q", content)
+}
+return []byte(`{"choices":[{"message":{"role":"assistant","content":"OK, I won't."}}]}`), nil
+},
+})
+if err != nil {
+t.Fatal(err)
+}
+if calls != 2 {
+t.Fatalf("expected 2 vllm calls, got %d", calls)
+}
+if len(results) != 1 || results[0].Status != "error" || results[0].Error != "user_denied" {
+t.Fatalf("results: %+v", results)
+}
+// Expect tool_call -> tool_confirm_request -> tool_result
+want := []string{"tool_call", "tool_confirm_request", "tool_result"}
+if len(events) != len(want) {
+t.Fatalf("events: %v", events)
+}
+for i, w := range want {
+if events[i] != w {
+t.Fatalf("event[%d] = %s, want %s", i, events[i], w)
+}
+}
+}

@@ -159,6 +159,20 @@ func (c *Catalog) Server(name string) (Server, bool) {
 	return Server{}, false
 }
 
+// Tool looks up a single cached tool by qualified name ("<server>__<tool>").
+// The cache is NOT refreshed on miss: the caller should already have
+// driven Tools(ctx) at least once before invoking this.
+func (c *Catalog) Tool(qualifiedName string) (Tool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, t := range c.cached {
+		if t.QualifiedName() == qualifiedName {
+			return t, true
+		}
+	}
+	return Tool{}, false
+}
+
 func fetchTools(ctx context.Context, client *http.Client, s Server) ([]Tool, error) {
 	url := strings.TrimRight(s.BaseURL, "/") + "/api/v1/mcp/tools"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

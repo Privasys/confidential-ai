@@ -93,11 +93,18 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 		// Dispatch each tool call serially. Parallelism is a follow-up.
 		for _, tc := range toolCalls {
 			if opt.EmitEvent != nil {
-				opt.EmitEvent("tool_call", map[string]any{
+				ev := map[string]any{
 					"id":   tc.ID,
 					"name": tc.Function.Name,
 					"args": tc.Function.Arguments,
-				})
+				}
+				// Surface the catalogue's "requires_user_confirmation"
+				// flag so the front-end can mark the card as a
+				// privileged action (write tools, send-email, etc.).
+				if t, ok := dispatcher.catalog.Tool(tc.Function.Name); ok && t.RequiresUserConfirmation {
+					ev["requires_confirmation"] = true
+				}
+				opt.EmitEvent("tool_call", ev)
 			}
 
 			args := json.RawMessage(tc.Function.Arguments)

@@ -364,13 +364,15 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 			continue
 		}
 
-		// Forward every other line verbatim
+		// Forward every line verbatim and flush immediately. SSE events
+		// are framed with a trailing blank line ("data: …\n\n"), so the
+		// scanner emits at least two writes per event. Flushing after
+		// every line guarantees the browser sees each token chunk as
+		// soon as vLLM produces it, instead of waiting for the next
+		// scan iteration to surface the separator. This is what the
+		// chat UI experiences as smooth typing vs. ~5 s blocky chunks.
 		fmt.Fprintf(w, "%s\n", line)
-
-		// Flush on data lines (SSE events are terminated by blank lines)
-		if line == "" {
-			flusher.Flush()
-		}
+		flusher.Flush()
 	}
 
 	// If the stream ended without [DONE] (e.g. connection dropped),

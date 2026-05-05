@@ -24,10 +24,16 @@ func main() {
 	// Otherwise fall back to legacy mode (vLLM started by entrypoint.sh).
 	var modelMgr *models.Manager
 	if info, err := os.Stat(cfg.ModelsDir); err == nil && info.IsDir() {
-		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort, cfg.RoothashDir)
+		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort, cfg.RoothashDir, cfg.StateFile)
 		logJSON("info", "dynamic model loading enabled", map[string]string{
 			"models_dir": cfg.ModelsDir,
+			"state_file": cfg.StateFile,
 		})
+		if restored, err := modelMgr.RestoreFromDisk(); err != nil {
+			logJSON("warn", "model auto-restore failed", map[string]string{"error": err.Error()})
+		} else if restored != "" {
+			logJSON("info", "model auto-restore initiated", map[string]string{"model": restored})
+		}
 	} else {
 		logJSON("info", "legacy mode (vLLM managed by entrypoint)", nil)
 	}

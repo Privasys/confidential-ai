@@ -28,6 +28,14 @@ type Config struct {
 	// of hashing the safetensors index.
 	RoothashDir string
 
+	// StateFile is the path on the per-container encrypted volume where
+	// the most recently successful /v1/models/load request is
+	// persisted. On container start the proxy reads this file and
+	// auto-issues the same Load so a restart (typically after a Spot-VM
+	// reboot) recovers the previously-served model without manual
+	// orchestration. Empty disables the feature.
+	StateFile string
+
 	// LoadToken, when non-empty, is required as Bearer credential on
 	// POST /v1/models/load and POST /v1/models/unload. Issued to the
 	// fleet manager / orchestrator only. When empty, the endpoints
@@ -85,6 +93,8 @@ func Parse(args []string) (*Config, error) {
 		"TEE type: tdx or sev-snp (env: TEE_TYPE)")
 	fs.StringVar(&cfg.RoothashDir, "roothash-dir", envOr("ROOTHASH_DIR", "/var/lib/enclave-os/model-roothashes"),
 		"Directory of per-model dm-verity root hashes (env: ROOTHASH_DIR)")
+	fs.StringVar(&cfg.StateFile, "state-file", envOr("STATE_FILE", "/data/last-load.json"),
+		"Path where the last successful Load request is persisted for auto-restore on restart (env: STATE_FILE; empty disables)")
 	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
 		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),

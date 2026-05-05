@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,6 +70,14 @@ type Manager struct {
 	vllmPort    int    // port for vLLM to listen on
 	roothashDir string // directory of <model>.roothash files written by disk-mounter
 
+	// stateFile, when non-empty, is the path on the per-container
+	// encrypted volume (typically /data/last-load.json) where the
+	// most-recently-successful LoadRequest is persisted. RestoreFromDisk
+	// reads it on boot and re-issues Load so a container restart (e.g.
+	// post-VM-reboot) auto-recovers the previously-served model without
+	// needing the orchestrator to issue a fresh /v1/models/load.
+	stateFile string
+
 	mu           sync.RWMutex
 	state        State
 	model        string
@@ -82,12 +91,15 @@ type Manager struct {
 	cancel       context.CancelFunc
 }
 
-// NewManager creates a new model manager.
-func NewManager(modelsDir string, vllmPort int, roothashDir string) *Manager {
+// NewManager creates a new model manager. stateFile may be empty to
+// disable persistence (in-process testing). When non-empty the file is
+// written after every successful Load and read by RestoreFromDisk.
+func NewManager(modelsDir string, vllmPort int, roothashDir, stateFile string) *Manager {
 	return &Manager{
 		modelsDir:   modelsDir,
 		vllmPort:    vllmPort,
 		roothashDir: roothashDir,
+		stateFile:   stateFile,
 		state:       StateIdle,
 	}
 }
@@ -383,6 +395,9 @@ func (m *Manager) doLoad(req LoadRequest) {
 	m.message = "Model loaded and serving"
 	m.mu.Unlock()
 
+	// Persist the successful load so a container restart auto-recovers.
+	m.persistRequest(req)
+
 	// Wait for process exit (blocks until vLLM dies or is killed).
 	if err := cmd.Wait(); err != nil {
 		m.mu.Lock()
@@ -562,4 +577,63 @@ func (m *Manager) setFailed(errMsg string) {
 	m.state = StateFailed
 	m.loadErr = errMsg
 	m.message = "Failed: " + errMsg
+}
+
+// persistRequest writes the LoadRequest to stateFile so a future
+// RestoreFromDisk call can re-issue it. Best-effort: failures are
+// logged-via-message but never returned, since the in-memory load has
+// already succeeded.
+func (m *Manager) persistRequest(req LoadRequest) {
+	if m.stateFile == "" {
+		return
+	}
+	data, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := m.stateFile + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "{\"level\":\"warn\",\"msg\":\"persistRequest mkdir failed\",\"error\":%q}\n", err.Error())
+		return
+	}
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "{\"level\":\"warn\",\"msg\":\"persistRequest write failed\",\"error\":%q}\n", err.Error())
+		return
+	}
+	if err := os.Rename(tmp, m.stateFile); err != nil {
+		fmt.Fprintf(os.Stderr, "{\"level\":\"warn\",\"msg\":\"persistRequest rename failed\",\"error\":%q}\n", err.Error())
+	}
+}
+
+// RestoreFromDisk reads stateFile (if present) and asynchronously
+// re-issues Load. Returns the restored model name, or empty string when
+// no state file exists. Errors reading/parsing the file are returned;
+// errors from the (background) Load surface via Status().
+//
+// Call this from main after constructing the Manager. It is safe to
+// call before the HTTP server starts: vLLM startup is async, so the
+// HTTP server will come up immediately and the model will report
+// state=loading until it's ready.
+func (m *Manager) RestoreFromDisk() (string, error) {
+	if m.stateFile == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(m.stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", m.stateFile, err)
+	}
+	var req LoadRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return "", fmt.Errorf("parse %s: %w", m.stateFile, err)
+	}
+	if req.Model == "" {
+		return "", fmt.Errorf("state file %s has empty model", m.stateFile)
+	}
+	if err := m.Load(req); err != nil {
+		return req.Model, fmt.Errorf("auto-load %s: %w", req.Model, err)
+	}
+	return req.Model, nil
 }

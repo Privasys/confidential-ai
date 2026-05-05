@@ -33,7 +33,9 @@ func TestAgenticChatCompletions(t *testing.T) {
 	}))
 	defer mcp.Close()
 
-	// Fake vLLM: first call -> tool_call, second -> final answer.
+	// Fake vLLM: first call -> SSE chunk with a tool_call; second ->
+	// SSE chunk with the final assistant content. Both end with the
+	// standard `data: [DONE]` terminator vLLM uses in stream mode.
 	vllmCalls := 0
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -42,12 +44,27 @@ func TestAgenticChatCompletions(t *testing.T) {
 		vllmCalls++
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
+		if req["stream"] != true {
+			t.Errorf("vllm call %d: expected stream=true, got %v", vllmCalls, req["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		writeChunk := func(payload string) {
+			w.Write([]byte("data: " + payload + "\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 		if vllmCalls == 1 {
 			// First call must include `tools` array we injected.
 			if _, ok := req["tools"]; !ok {
 				t.Errorf("first vllm call missing tools array")
 			}
-			w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"t1","type":"function","function":{"name":"rag__search","arguments":"{\"query\":\"q\"}"}}]},"finish_reason":"tool_calls"}]}`))
+			// Tool-call as a single delta with the full args (vLLM
+			// emits these in fragments in real life — the accumulator
+			// handles either case).
+			writeChunk(`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"rag__search","arguments":"{\"query\":\"q\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			writeChunk("[DONE]")
 			return
 		}
 		// Second call must include the tool message at position N-1.
@@ -56,7 +73,8 @@ func TestAgenticChatCompletions(t *testing.T) {
 		if last["role"] != "tool" || last["tool_call_id"] != "t1" {
 			t.Errorf("second call: expected last message to be tool, got %+v", last)
 		}
-		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"the answer is 42"},"finish_reason":"stop"}]}`))
+		writeChunk(`{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"the answer is 42"},"finish_reason":"stop"}]}`)
+		writeChunk("[DONE]")
 	}))
 	defer vllm.Close()
 

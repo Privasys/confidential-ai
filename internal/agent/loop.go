@@ -72,13 +72,13 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 		return nil, nil, fmt.Errorf("decode request: %w", err)
 	}
 
-	// Force non-stream upstream while iterating; the caller is responsible
-	// for synthesising stream output if the original client wanted it.
-	// `stream_options` (e.g. `{include_usage: true}`) is only valid when
-	// `stream=true`; vLLM rejects the pair with HTTP 400 otherwise, so
-	// strip it whenever we override the stream flag.
-	req["stream"] = false
-	delete(req, "stream_options")
+	// NOTE: the loop is mode-agnostic. The caller is responsible for
+	// setting `stream` / `stream_options` to whatever the underlying
+	// Invoke implementation expects, AND for ensuring Invoke returns a
+	// non-stream-shaped response body (one `choices[0].message`) so
+	// parseToolCalls can inspect tool_calls between iterations. The
+	// streaming Invoke in handler/agent.go forwards content deltas to
+	// the client live while accumulating into that synthesised body.
 
 	allResults := make([]ToolResult, 0, 4)
 

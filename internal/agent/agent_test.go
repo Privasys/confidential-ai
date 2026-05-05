@@ -176,15 +176,15 @@ func TestRun_NoToolCalls_Passthrough(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`)
 	final, results, err := Run(context.Background(), d, body, LoopOptions{
 		Invoke: func(ctx context.Context, b []byte) ([]byte, error) {
-			// Verify stream was forced to false and stream_options stripped:
-			// vLLM rejects `stream_options` whenever `stream != true`.
+			// The loop is mode-agnostic: it must NOT mutate stream /
+			// stream_options. Verify the body reaches Invoke verbatim.
 			var req map[string]any
 			json.Unmarshal(b, &req)
-			if req["stream"] != false {
-				t.Fatalf("stream should be false, got %v", req["stream"])
+			if req["stream"] != true {
+				t.Fatalf("stream should be passed through as true, got %v", req["stream"])
 			}
-			if _, ok := req["stream_options"]; ok {
-				t.Fatalf("stream_options should be stripped, got %v", req["stream_options"])
+			if _, ok := req["stream_options"]; !ok {
+				t.Fatalf("stream_options should be passed through, got nothing")
 			}
 			return []byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`), nil
 		},

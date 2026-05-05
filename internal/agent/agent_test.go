@@ -173,14 +173,18 @@ func TestInjectTools(t *testing.T) {
 func TestRun_NoToolCalls_Passthrough(t *testing.T) {
 	cat := NewCatalog(nil, nil, time.Hour)
 	d := NewDispatcher(cat, nil)
-	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`)
 	final, results, err := Run(context.Background(), d, body, LoopOptions{
 		Invoke: func(ctx context.Context, b []byte) ([]byte, error) {
-			// Verify stream was forced to false.
+			// Verify stream was forced to false and stream_options stripped:
+			// vLLM rejects `stream_options` whenever `stream != true`.
 			var req map[string]any
 			json.Unmarshal(b, &req)
 			if req["stream"] != false {
 				t.Fatalf("stream should be false, got %v", req["stream"])
+			}
+			if _, ok := req["stream_options"]; ok {
+				t.Fatalf("stream_options should be stripped, got %v", req["stream_options"])
 			}
 			return []byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`), nil
 		},

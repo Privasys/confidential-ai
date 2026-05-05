@@ -74,7 +74,11 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 
 	// Force non-stream upstream while iterating; the caller is responsible
 	// for synthesising stream output if the original client wanted it.
+	// `stream_options` (e.g. `{include_usage: true}`) is only valid when
+	// `stream=true`; vLLM rejects the pair with HTTP 400 otherwise, so
+	// strip it whenever we override the stream flag.
 	req["stream"] = false
+	delete(req, "stream_options")
 
 	allResults := make([]ToolResult, 0, 4)
 

@@ -320,8 +320,25 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 }
 
 // proxyStream handles streaming SSE responses from vLLM.
-// It forwards each chunk as-is, then emits a final reproducibility event
-// before the [DONE] sentinel.
+//
+// Forwarding strategy: read **whole SSE events** (`data: …\n\n` /
+// `event: …\ndata: …\n\n`) and forward each one as a single Write +
+// Flush. Two reasons:
+//
+//   - Each downstream sealed frame (sessionrelay) becomes one complete
+//     SSE event. The browser SSE parser fires per frame, so the chat
+//     UI sees one delta per pacing tick instead of "data line then
+//     blank line" arriving as two AEAD frames (which doubled per-token
+//     overhead and added nothing usable).
+//   - The previous implementation used a `bufio.Scanner` line loop and
+//     an `fmt.Fprintf("%s\n", line)` per line, which split each event
+//     across two Write+Flush calls. Switching to event-aligned
+//     forwarding removes that latency artefact and the redundant
+//     formatting cost on the hot path.
+//
+// We also short-circuit `data: [DONE]` so the metadata event is
+// emitted *before* the sentinel even when vLLM packs both lines into
+// one TCP read.
 func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata) {
 	if resp.StatusCode != http.StatusOK {
 		// Error responses are not streamed; read and pass through.
@@ -344,42 +361,65 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // up to 1 MiB per line
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Forward the [DONE] sentinel last, after our metadata event.
-		if strings.TrimSpace(line) == "data: [DONE]" {
-			// Emit reproducibility metadata as a final SSE event
-			metaJSON, err := json.Marshal(map[string]any{"reproducibility": meta})
-			if err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", metaJSON)
-				flusher.Flush()
-			}
-			// Now send [DONE]
-			fmt.Fprintf(w, "%s\n", line)
-			flusher.Flush()
-			continue
+	emitMeta := func() {
+		metaJSON, err := json.Marshal(map[string]any{"reproducibility": meta})
+		if err != nil {
+			return
 		}
-
-		// Forward every line verbatim and flush immediately. SSE events
-		// are framed with a trailing blank line ("data: …\n\n"), so the
-		// scanner emits at least two writes per event. Flushing after
-		// every line guarantees the browser sees each token chunk as
-		// soon as vLLM produces it, instead of waiting for the next
-		// scan iteration to surface the separator. This is what the
-		// chat UI experiences as smooth typing vs. ~5 s blocky chunks.
-		fmt.Fprintf(w, "%s\n", line)
+		fmt.Fprintf(w, "data: %s\n\n", metaJSON)
 		flusher.Flush()
 	}
 
-	// If the stream ended without [DONE] (e.g. connection dropped),
-	// still try to emit metadata.
-	if err := scanner.Err(); err != nil {
-		h.requestsFailed.Add(1)
+	// Buffer for accumulating one SSE event (terminated by "\n\n").
+	var event []byte
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			event = append(event, line...)
+			// Event terminator: a blank line, i.e. the buffer ends in
+			// "\n\n". We compare on raw bytes so CRLF separators (rare
+			// in practice; vLLM emits LF) still work.
+			if bytes.HasSuffix(event, []byte("\n\n")) || bytes.Equal(event, []byte("\n")) {
+				if isDoneEvent(event) {
+					emitMeta()
+					_, _ = w.Write(event)
+					flusher.Flush()
+					event = event[:0]
+					continue
+				}
+				if _, werr := w.Write(event); werr != nil {
+					return
+				}
+				flusher.Flush()
+				event = event[:0]
+			}
+		}
+		if err != nil {
+			// Best-effort tail flush of an unterminated trailing event.
+			if len(event) > 0 {
+				_, _ = w.Write(event)
+				flusher.Flush()
+			}
+			if err != io.EOF {
+				h.requestsFailed.Add(1)
+			}
+			return
+		}
 	}
+}
+
+// isDoneEvent reports whether the SSE event block ends with the
+// `data: [DONE]` sentinel (ignoring trailing whitespace and any
+// preceding event:/id: lines).
+func isDoneEvent(event []byte) bool {
+	for _, line := range bytes.Split(bytes.TrimRight(event, "\n"), []byte("\n")) {
+		if bytes.Equal(bytes.TrimSpace(line), []byte("data: [DONE]")) {
+			return true
+		}
+	}
+	return false
 }
 
 // proxyDirect forwards the request to vLLM without modification.

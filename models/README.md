@@ -116,3 +116,58 @@ verity root hash of the bytes that vLLM has actually mapped. To populate
 it, ensure (a) the enclave manager has `MGMT_BASE_URL`, `ENCLAVE_TOKEN`
 and `ENCLAVE_ID` set so the runtime-status push runs, and (b) the model
 is loaded.
+
+## Reasoning & tool calling (Gemma 4)
+
+`Dockerfile.prod` pins **vLLM v0.20.1** (release notes:
+[vllm-project/vllm v0.20.1](https://github.com/vllm-project/vllm/releases/tag/v0.20.1)),
+which ships first-class Gemma 4 reasoning + tool-call parsers per the
+[official Gemma 4 thinking recipe](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html).
+The image also bakes the official chat template into
+`/opt/vllm-templates/tool_chat_template_gemma4.jinja` so the manager can
+reference it by short name.
+
+When `POST /v1/models/load` receives a request whose `model` slug
+contains `gemma4`, `internal/models/manager.go::doLoad` auto-applies:
+
+```text
+--enable-auto-tool-choice
+--reasoning-parser gemma4
+--tool-call-parser gemma4
+--chat-template /opt/vllm-templates/tool_chat_template_gemma4.jinja
+--default-chat-template-kwargs {"enable_thinking": true}
+```
+
+Callers can override any of the auto-applied flags via the new optional
+`LoadRequest` fields (`reasoning_parser`, `tool_call_parser`,
+`enable_auto_tool_choice`, `chat_template`, `enable_thinking`) — the
+auto-defaults are only used when the corresponding field is unset.
+
+User-visible effect: the OpenAI-compatible streaming response carries
+`message.reasoning` (non-stream) or `delta.reasoning_content` (stream)
+**separately** from `delta.content`. The chat front-end re-wraps the
+reasoning channel in `<think>…</think>` sentinels so the existing
+`splitReasoning()` / `ThinkingBlock` UI keeps working unchanged. The
+system prompt no longer contains any "wrap your thoughts in `<think>`"
+nudges — that was a workaround for vLLM < 0.20 and has been removed.
+
+### SSE framing through the sealed-session relay
+
+`internal/handler/handler.go::proxyStream` forwards the upstream vLLM
+stream **one SSE event per Write+Flush** (an event is everything up to
+and including the terminating blank line). The sealed-session relay in
+enclave-os-virtual maps each Write to one length-prefixed AEAD-sealed
+frame, so this guarantees that one sealed frame contains exactly one
+SSE event. Before this change the proxy emitted the `data:` line and
+the trailing blank line as two separate flushes, which doubled
+AEAD/CBOR overhead and produced frames that did not align with SSE
+event boundaries (so the browser SSE parser could not fire per frame).
+The reproducibility metadata event is still injected immediately
+before `data: [DONE]`.
+
+### Upgrade requirement
+
+vLLM v0.20.x requires `transformers>=5.5.0`, which is pulled in
+transitively by the `uv pip install` in `Dockerfile.prod`. CUDA 12.6 is
+still supported via `--torch-backend=cu126`, so the base image
+(`nvidia/cuda:12.6.3-runtime-ubuntu24.04`) does not need to change.

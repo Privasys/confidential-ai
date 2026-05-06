@@ -45,12 +45,32 @@ const (
 // This split lets the served name stay friendly ("gemma4-31b") even when
 // the on-disk path is awkward ("/models/gemma-4-31b-it").
 type LoadRequest struct {
-	Model                 string  `json:"model"`                            // canonical served name (required)
-	Source                string  `json:"source,omitempty"`                 // optional loader hint: path or HF repo
-	Dtype                 string  `json:"dtype,omitempty"`                  // default "auto"
-	Quantization          string  `json:"quantization,omitempty"`           // awq, gptq, int4, etc.
-	MaxModelLen           int     `json:"max_model_len,omitempty"`          // default 8192
-	GPUMemoryUtilization  float64 `json:"gpu_memory_utilization,omitempty"` // default 0.90
+	Model                string  `json:"model"`                            // canonical served name (required)
+	Source               string  `json:"source,omitempty"`                 // optional loader hint: path or HF repo
+	Dtype                string  `json:"dtype,omitempty"`                  // default "auto"
+	Quantization         string  `json:"quantization,omitempty"`           // awq, gptq, int4, etc.
+	MaxModelLen          int     `json:"max_model_len,omitempty"`          // default 8192
+	GPUMemoryUtilization float64 `json:"gpu_memory_utilization,omitempty"` // default 0.90
+
+	// ReasoningParser, ToolCallParser, ChatTemplate and EnableAutoToolChoice
+	// wire vLLM's per-architecture reasoning + tool-call parsers. When
+	// ReasoningParser is set the OpenAI streaming response carries
+	// `delta.reasoning_content` separately from `delta.content`, which the
+	// chat front-end re-wraps in <think>…</think> sentinels so existing
+	// reasoning UI keeps working without the model having to invent any
+	// markup itself. ChatTemplate, when non-empty, is passed verbatim to
+	// `--chat-template`; the entrypoint downloads the official Gemma 4
+	// template into /opt/vllm-templates so callers can reference
+	// `gemma4` (canonical) without needing the absolute path.
+	ReasoningParser      string `json:"reasoning_parser,omitempty"`
+	ToolCallParser       string `json:"tool_call_parser,omitempty"`
+	EnableAutoToolChoice bool   `json:"enable_auto_tool_choice,omitempty"`
+	ChatTemplate         string `json:"chat_template,omitempty"`
+	// EnableThinking, when true, sets vLLM's
+	// `--default-chat-template-kwargs '{"enable_thinking": true}'` so
+	// reasoning is on for every request unless the caller opts out via
+	// `chat_template_kwargs`. Required by the Gemma 4 thinking recipe.
+	EnableThinking bool `json:"enable_thinking,omitempty"`
 }
 
 // Status is the response for GET /v1/models/status.
@@ -314,6 +334,32 @@ func (m *Manager) doLoad(req LoadRequest) {
 	if batchedTokens < 16384 {
 		batchedTokens = 16384
 	}
+
+	// Sensible defaults for known model families. Callers (the seed
+	// scripts, the management-service, ad-hoc /v1/models/load) don't
+	// have to know which architecture-specific reasoning + tool
+	// parsers vLLM ships; if the canonical id contains "gemma4" we
+	// auto-wire the official Gemma 4 thinking recipe (see
+	// https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html).
+	// Explicit fields on LoadRequest still win, so anyone can override
+	// (e.g. to disable thinking-by-default or point at a custom
+	// chat template).
+	if strings.Contains(strings.ToLower(req.Model), "gemma4") {
+		if req.ReasoningParser == "" {
+			req.ReasoningParser = "gemma4"
+		}
+		if req.ToolCallParser == "" {
+			req.ToolCallParser = "gemma4"
+			req.EnableAutoToolChoice = true
+		}
+		if req.ChatTemplate == "" {
+			req.ChatTemplate = "gemma4"
+		}
+		if !req.EnableThinking {
+			req.EnableThinking = true
+		}
+	}
+
 	args := []string{
 		"serve", modelPath,
 		"--served-model-name", req.Model,
@@ -329,6 +375,29 @@ func (m *Manager) doLoad(req LoadRequest) {
 	}
 	if req.Quantization != "" && req.Quantization != "none" {
 		args = append(args, "--quantization", req.Quantization)
+	}
+	if req.ReasoningParser != "" {
+		args = append(args, "--reasoning-parser", req.ReasoningParser)
+	}
+	if req.ToolCallParser != "" {
+		args = append(args, "--tool-call-parser", req.ToolCallParser)
+	}
+	if req.EnableAutoToolChoice {
+		args = append(args, "--enable-auto-tool-choice")
+	}
+	if req.ChatTemplate != "" {
+		// Convenience: shorthand like "gemma4" resolves to the official
+		// template baked into /opt/vllm-templates by the prod image.
+		// Anything else is forwarded verbatim so callers can also point
+		// at a custom path.
+		path := req.ChatTemplate
+		if !strings.ContainsAny(path, "/.") {
+			path = "/opt/vllm-templates/tool_chat_template_" + path + ".jinja"
+		}
+		args = append(args, "--chat-template", path)
+	}
+	if req.EnableThinking {
+		args = append(args, "--default-chat-template-kwargs", `{"enable_thinking": true}`)
 	}
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)

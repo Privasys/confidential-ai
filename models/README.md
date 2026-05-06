@@ -66,3 +66,53 @@ this gives deterministic output for serialised requests on the same
 hardware. Per-request determinism under concurrent traffic still requires
 batch-invariant kernels (tracked separately). See the main README for the
 full reproducibility protocol.
+
+## Canonical model id (a.k.a. `--served-model-name`)
+
+The string clients put in the `model` field of `POST /v1/chat/completions`
+(and that `GET /v1/models` advertises) is the **canonical model id**. It
+is set by the loader via vLLM's `--served-model-name` and **must equal**:
+
+- the `name` field of every entry the management-service publishes in
+  `GET /api/v1/ai/instances/<alias>` → `available_models[].name`;
+- the value the chat front-end forwards verbatim (the proxy never
+  rewrites `model`; see `internal/handler/handler.go` →
+  `proxyWithReproducibility`).
+
+The current convention is a short slug, e.g. `gemma4-31b`, **not** a
+filesystem path like `/models/gemma4-31b`. A path-style id used to leak
+through when the public fleet was hand-seeded; the chat UI then sent
+`/models/gemma4-31b` while vLLM was serving `gemma4-31b`, producing a
+404 with "The model /models/gemma4-31b does not exist". Always pick a
+short slug here and re-use it everywhere.
+
+### Loading a model
+
+There is **no `management-service` command that loads a model.** Model
+loading is a confidential-ai proxy operation:
+
+```bash
+curl -X POST -H "Authorization: Bearer $LOAD_TOKEN" \
+     -H 'Content-Type: application/json' \
+     https://<enclave-host>/v1/models/load \
+     -d '{"model":"gemma4-31b"}'
+```
+
+The state machine (`internal/models/manager.go`) goes
+`idle → loading → ready` (~3 min cold). `GET /v1/models/status` returns
+`{state, model, model_digest, progress, message}`. The in-image manager
+(`enclave-os-virtual/internal/runtimestatus`) polls that endpoint every
+30 s and pushes deltas to
+`management-service/api/v1/enclave/runtime-status`. The mgmt-service then
+folds `loaded_model` + `loaded_model_digest` into
+`available_models[].digest` and `loaded` whenever it answers `GET
+/api/v1/ai/instances/<alias>` (see `fleets.go` → `GetInstance`).
+
+Consequence: `available_models[].digest` will be **empty** in the
+instance API response whenever no enclave in the fleet currently reports
+the model as `state=ready`. That is the correct behaviour — the digest
+is only meaningful for a currently-loaded model, since it is the OID 3.5
+verity root hash of the bytes that vLLM has actually mapped. To populate
+it, ensure (a) the enclave manager has `MGMT_BASE_URL`, `ENCLAVE_TOKEN`
+and `ENCLAVE_ID` set so the runtime-status push runs, and (b) the model
+is loaded.

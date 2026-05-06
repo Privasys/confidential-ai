@@ -1,0 +1,55 @@
+name: Determinism Gate (e2e)
+
+# Runs N=10 sequential chat completions against a live confidential-ai
+# proxy and asserts bit-identical token streams + stable model_digest.
+#
+# Triggered manually (workflow_dispatch). Designed to be wired to a
+# nightly schedule once a long-lived service-account JWT path is in
+# place; today the JWT TTL is ~15 min so manual triggering with a fresh
+# token is the safest pattern.
+#
+# Required repo secrets / inputs:
+#   - CONFIDENTIAL_AI_URL: e.g. https://m2-dev-ai.privasys.org
+#   - CONFIDENTIAL_AI_TOKEN: fresh manager-role bearer token
+#
+# See .operations/know-how/manager-jwt.md for the JWT minting recipe
+# (private repo - reach out to platform team if you need access).
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Confidential-AI proxy base URL"
+        required: true
+        default: "https://m2-dev-ai.privasys.org"
+      model:
+        description: "Model name to query"
+        required: true
+        default: "gemma4-31b"
+      n:
+        description: "Number of sequential requests"
+        required: true
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  determinism:
+    name: Determinism (sequential, N=${{ github.event.inputs.n }})
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Run determinism gate
+        env:
+          CONFIDENTIAL_AI_URL: ${{ github.event.inputs.url }}
+          CONFIDENTIAL_AI_TOKEN: ${{ secrets.CONFIDENTIAL_AI_TOKEN }}
+        run: |
+          go test -tags=e2e -v -count=1 \
+            -run TestDeterminismSequential \
+            -confidential-ai-model='${{ github.event.inputs.model }}' \
+            -determinism-n=${{ github.event.inputs.n }} \
+            ./internal/handler/...

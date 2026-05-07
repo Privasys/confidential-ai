@@ -327,9 +327,11 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 			Choices []struct {
 				Index int `json:"index"`
 				Delta struct {
-					Role      string `json:"role"`
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Role             string `json:"role"`
+					Content          string `json:"content"`
+					Reasoning        string `json:"reasoning"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Type     string `json:"type"`
@@ -369,6 +371,15 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 			}
 			if ch.Delta.Content != "" {
 				contentBuf.WriteString(ch.Delta.Content)
+				hasContent = true
+			}
+			// Native reasoning channel (vLLM `--reasoning-parser`):
+			// surface to the client just like content. Without this
+			// the agentic loop's stream filter swallowed every
+			// reasoning_content/reasoning delta and the chat UI saw
+			// only the final finish_reason chunk after the model had
+			// burned its full max_tokens budget thinking.
+			if ch.Delta.ReasoningContent != "" || ch.Delta.Reasoning != "" {
 				hasContent = true
 			}
 			if ch.FinishReason != "" {

@@ -47,6 +47,10 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 		return errResult(qualifiedName, fmt.Sprintf("unknown MCP server %q", server), started)
 	}
 
+	if srv.Transport == TransportMCPSSE {
+		return d.callSSE(ctx, qualifiedName, srv, tool, args, bearer, started)
+	}
+
 	url := strings.TrimRight(srv.BaseURL, "/") + "/api/v1/mcp/tools/" + tool
 	body := args
 	if len(body) == 0 {
@@ -57,8 +61,8 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 		return errResult(qualifiedName, err.Error(), started)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if srv.BearerForward && bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if d.authHeader(srv, bearer) != "" {
+		req.Header.Set("Authorization", d.authHeader(srv, bearer))
 	}
 
 	resp, err := d.client.Do(req)
@@ -80,6 +84,75 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 		Name:       qualifiedName,
 		Status:     "ok",
 		Result:     respBody,
+		DurationMs: time.Since(started).Milliseconds(),
+	}
+}
+
+// authHeader resolves the Authorization header value for an outbound
+// tool call based on the server's auth_mode. The `exchange` mode is
+// meant to mint a tool-scoped JWT via the Privasys IdP at privasys.id
+// (jwt-bearer grant + audience:<auth_audience> scope, see
+// .operations/ai-platform/ai-tools-plan.md section 11). Until that
+// IdP-side flow lands `exchange` falls back to `forward` semantics so
+// existing in-fleet calls continue to work end-to-end.
+// TODO(ai-tools): mint via Privasys IdP - NOT via management-service.
+func (d *Dispatcher) authHeader(srv Server, bearer string) string {
+	switch srv.effectiveAuthMode() {
+	case AuthModeForward, AuthModeExchange:
+		if bearer == "" {
+			return ""
+		}
+		return "Bearer " + bearer
+	case AuthModeStatic:
+		if srv.StaticBearer == "" {
+			return ""
+		}
+		return "Bearer " + srv.StaticBearer
+	default:
+		return ""
+	}
+}
+
+// callSSE dispatches via the persistent MCP-over-SSE client.
+func (d *Dispatcher) callSSE(ctx context.Context, qualifiedName string, srv Server, tool string, args json.RawMessage, bearer string, started time.Time) ToolResult {
+	cli := d.catalog.sseClient(srv)
+	hp := func() http.Header {
+		auth := d.authHeader(srv, bearer)
+		if auth == "" {
+			return nil
+		}
+		h := http.Header{}
+		h.Set("Authorization", auth)
+		return h
+	}
+	res, err := cli.CallTool(ctx, tool, args, hp)
+	if err != nil {
+		return errResult(qualifiedName, err.Error(), started)
+	}
+	// Surface IsError from the MCP result as our error status.
+	if res.IsError {
+		text := ""
+		for _, b := range res.Content {
+			if b.Type == "text" {
+				text = b.Text
+				break
+			}
+		}
+		if text == "" {
+			text = "tool reported error"
+		}
+		return errResult(qualifiedName, text, started)
+	}
+	// Use the raw JSON-RPC result so the model sees the full MCP shape
+	// (content blocks etc).
+	out := res.Raw
+	if len(out) == 0 || !json.Valid(out) {
+		out, _ = json.Marshal(map[string]any{"content": res.Content})
+	}
+	return ToolResult{
+		Name:       qualifiedName,
+		Status:     "ok",
+		Result:     out,
 		DurationMs: time.Since(started).Milliseconds(),
 	}
 }

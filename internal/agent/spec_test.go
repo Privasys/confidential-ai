@@ -27,6 +27,23 @@ func TestParseServerSpec(t *testing.T) {
 				t.Fatalf("%+v", ss[1])
 			}
 		}},
+		"sse_exchange": {"lp=https://lightpanda.example?transport=mcp_sse&auth=exchange&aud=lightpanda&scopes=browse", 1, func(t *testing.T, ss []Server) {
+			s := ss[0]
+			if s.Transport != TransportMCPSSE {
+				t.Fatalf("transport: %q", s.Transport)
+			}
+			if s.AuthMode != AuthModeExchange || s.AuthAudience != "lightpanda" {
+				t.Fatalf("auth: %+v", s)
+			}
+			if len(s.AuthScopes) != 1 || s.AuthScopes[0] != "browse" {
+				t.Fatalf("scopes: %+v", s.AuthScopes)
+			}
+		}},
+		"confirm": {"w=http://x?confirm=1", 1, func(t *testing.T, ss []Server) {
+			if !ss[0].RequiresUserConfirmation {
+				t.Fatal("confirm not set")
+			}
+		}},
 	}
 	for name, tc := range good {
 		t.Run(name, func(t *testing.T) {
@@ -49,6 +66,9 @@ func TestParseServerSpec(t *testing.T) {
 		"rag=notaurl",
 		"rag=http://x,rag=http://y",
 		"bad-name=http://x",
+		"lp=http://x?transport=bogus",
+		"lp=http://x?auth=bogus",
+		"lp=http://x?auth=exchange",
 	}
 	for _, in := range bad {
 		t.Run("bad/"+in, func(t *testing.T) {

@@ -89,10 +89,13 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 }
 
 // authHeader resolves the Authorization header value for an outbound
-// tool call based on the server's auth_mode. Token-exchange minting is
-// not yet wired into the dispatcher; for now `exchange` falls back to
-// `forward` so existing in-fleet calls continue to work end-to-end.
-// TODO(ai-tools, phase 3): wire mgmt-service /token-exchange here.
+// tool call based on the server's auth_mode. The `exchange` mode is
+// meant to mint a tool-scoped JWT via the Privasys IdP at privasys.id
+// (jwt-bearer grant + audience:<auth_audience> scope, see
+// .operations/ai-platform/ai-tools-plan.md section 11). Until that
+// IdP-side flow lands `exchange` falls back to `forward` semantics so
+// existing in-fleet calls continue to work end-to-end.
+// TODO(ai-tools): mint via Privasys IdP - NOT via management-service.
 func (d *Dispatcher) authHeader(srv Server, bearer string) string {
 	switch srv.effectiveAuthMode() {
 	case AuthModeForward, AuthModeExchange:

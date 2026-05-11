@@ -10,11 +10,20 @@ import (
 //
 // Format:
 //
-//	name1=https://url1[?bearer=1],name2=https://url2,...
+//	name1=https://url1[?bearer=1&transport=mcp_sse&auth=exchange&aud=...&scopes=a+b],name2=...
 //
-// `bearer=1` flips BearerForward on for that server. Trailing slashes on
-// the URL are stripped. Names must match [a-zA-Z0-9_]+ so they survive
-// concatenation with the tool name into a vLLM function name.
+// Supported query-string keys (all optional):
+//
+//	bearer=1                     -> BearerForward=true (legacy)
+//	transport=privasys_http|mcp_sse  (default: privasys_http)
+//	auth=forward|exchange|static|none
+//	aud=<audience>               -> AuthAudience (required when auth=exchange)
+//	scopes=a+b+c                 -> AuthScopes (space-separated, URL-encoded)
+//	confirm=1                    -> RequiresUserConfirmation=true
+//
+// Trailing slashes on the URL are stripped. Names must match
+// [a-zA-Z0-9_]+ so they survive concatenation with the tool name into a
+// vLLM function name.
 func ParseServerSpec(spec string) ([]Server, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -45,15 +54,48 @@ func ParseServerSpec(spec string) ([]Server, error) {
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return nil, fmt.Errorf("entry %q: invalid URL", p)
 		}
-		bearer := false
+		s := Server{Name: name}
 		q := u.Query()
 		if q.Get("bearer") == "1" {
-			bearer = true
+			s.BearerForward = true
 			q.Del("bearer")
-			u.RawQuery = q.Encode()
 		}
-		base := strings.TrimRight(u.String(), "/")
-		out = append(out, Server{Name: name, BaseURL: base, BearerForward: bearer})
+		if t := q.Get("transport"); t != "" {
+			switch t {
+			case TransportPrivasysHTTP, TransportMCPSSE:
+				s.Transport = t
+			default:
+				return nil, fmt.Errorf("entry %q: invalid transport %q", p, t)
+			}
+			q.Del("transport")
+		}
+		if a := q.Get("auth"); a != "" {
+			switch a {
+			case AuthModeForward, AuthModeExchange, AuthModeStatic, AuthModeNone:
+				s.AuthMode = a
+			default:
+				return nil, fmt.Errorf("entry %q: invalid auth %q", p, a)
+			}
+			q.Del("auth")
+		}
+		if aud := q.Get("aud"); aud != "" {
+			s.AuthAudience = aud
+			q.Del("aud")
+		}
+		if scopes := q.Get("scopes"); scopes != "" {
+			s.AuthScopes = strings.Fields(scopes)
+			q.Del("scopes")
+		}
+		if q.Get("confirm") == "1" {
+			s.RequiresUserConfirmation = true
+			q.Del("confirm")
+		}
+		if s.AuthMode == AuthModeExchange && s.AuthAudience == "" {
+			return nil, fmt.Errorf("entry %q: auth=exchange requires aud=", p)
+		}
+		u.RawQuery = q.Encode()
+		s.BaseURL = strings.TrimRight(u.String(), "/")
+		out = append(out, s)
 	}
 	return out, nil
 }

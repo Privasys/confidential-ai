@@ -24,15 +24,27 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/privasys/confidential-ai/internal/agent/mcpsse"
+)
+
+// TransportPrivasysHTTP is the legacy in-house MCP transport: GET
+// <base>/api/v1/mcp/tools and POST <base>/api/v1/mcp/tools/<name>.
+// TransportMCPSSE is the standard MCP-over-SSE transport (long-lived).
+const (
+	TransportPrivasysHTTP = "privasys_http"
+	TransportMCPSSE       = "mcp_sse"
+)
+
+// AuthMode controls how the proxy mints / forwards a bearer per call.
+const (
+	AuthModeForward  = "forward"  // forward end-user JWT verbatim
+	AuthModeExchange = "exchange" // mint via /api/v1/internal/token-exchange
+	AuthModeStatic   = "static"   // inject from StaticBearer
+	AuthModeNone     = "none"     // send no Authorization header
 )
 
 // Server describes a single upstream MCP server the proxy talks to.
-//
-// Convention: each server exposes
-//   GET  <BaseURL>/api/v1/mcp/tools             -> {"tools": [Tool, ...]}
-//   POST <BaseURL>/api/v1/mcp/tools/<tool_name> -> arbitrary JSON result
-//
-// Same shape served by Privasys/private-rag.
 type Server struct {
 	// Name is the per-server prefix the orchestrator prepends to the
 	// underlying tool name when advertising to the model. Two MCP servers
@@ -47,10 +59,28 @@ type Server struct {
 	// or the privasys.org subdomain for cross-fleet calls).
 	BaseURL string
 
-	// BearerForward, if true, forwards the end-user's Authorization
-	// header from the original chat request to the MCP server. Required
-	// for `private-rag` (per-user conversations + ownership). For
-	// stateless tools like `lightpanda.browse` it can stay false.
+	// Transport is one of TransportPrivasysHTTP (default for backward
+	// compat) or TransportMCPSSE.
+	Transport string
+
+	// AuthMode is one of forward|exchange|static|none. Empty defaults to
+	// forward to keep dev wiring simple, but every production tool
+	// configured via management-service uses 'exchange'.
+	AuthMode string
+
+	// AuthAudience is the target audience for AuthModeExchange. Required
+	// when AuthMode == "exchange".
+	AuthAudience string
+
+	// AuthScopes is the requested scope set for AuthModeExchange.
+	AuthScopes []string
+
+	// StaticBearer is the literal token sent when AuthMode == "static".
+	StaticBearer string
+
+	// BearerForward is the legacy flag that maps to AuthMode == forward.
+	// Kept so existing MCP_SERVERS env strings still work; new code
+	// should set AuthMode directly.
 	BearerForward bool
 
 	// RequiresUserConfirmation, if true, every tool call this server
@@ -60,6 +90,17 @@ type Server struct {
 	// per-tool flag comes from the catalogue; this is the per-server
 	// default when the tool descriptor omits it.
 	RequiresUserConfirmation bool
+}
+
+// effectiveAuthMode normalises AuthMode + the legacy BearerForward flag.
+func (s Server) effectiveAuthMode() string {
+	if s.AuthMode != "" {
+		return s.AuthMode
+	}
+	if s.BearerForward {
+		return AuthModeForward
+	}
+	return AuthModeNone
 }
 
 // Tool is the catalogue entry for a single MCP tool, augmented with the
@@ -93,11 +134,15 @@ type Catalog struct {
 	servers []Server
 	client  *http.Client
 	ttl     time.Duration
+	logf    func(string, ...any)
 
 	mu        sync.Mutex
 	lastFetch time.Time
 	cached    []Tool
 	cachedErr error
+
+	sseMu      sync.Mutex
+	sseClients map[string]*mcpsse.Client
 }
 
 // NewCatalog returns a catalogue that refreshes every ttl. A zero ttl is
@@ -109,7 +154,43 @@ func NewCatalog(servers []Server, client *http.Client, ttl time.Duration) *Catal
 	if ttl <= 0 {
 		ttl = 60 * time.Second
 	}
-	return &Catalog{servers: servers, client: client, ttl: ttl}
+	return &Catalog{
+		servers:    servers,
+		client:     client,
+		ttl:        ttl,
+		sseClients: map[string]*mcpsse.Client{},
+		logf:       func(string, ...any) {},
+	}
+}
+
+// SetLogger installs a logger for SSE adapter diagnostics. Optional.
+func (c *Catalog) SetLogger(logf func(string, ...any)) {
+	if logf != nil {
+		c.logf = logf
+	}
+}
+
+// sseClient returns the persistent MCP-SSE client for s, creating it on
+// first use. Safe for concurrent callers.
+func (c *Catalog) sseClient(s Server) *mcpsse.Client {
+	c.sseMu.Lock()
+	defer c.sseMu.Unlock()
+	if cli, ok := c.sseClients[s.Name]; ok {
+		return cli
+	}
+	cli := mcpsse.New(s.BaseURL, nil, c.logf)
+	c.sseClients[s.Name] = cli
+	return cli
+}
+
+// Close tears down all persistent SSE sessions.
+func (c *Catalog) Close() {
+	c.sseMu.Lock()
+	defer c.sseMu.Unlock()
+	for _, cli := range c.sseClients {
+		cli.Close()
+	}
+	c.sseClients = map[string]*mcpsse.Client{}
 }
 
 // Tools returns the merged tool list. If the cache is fresh, it is
@@ -130,7 +211,7 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 		anyOK bool
 	)
 	for _, s := range c.servers {
-		tools, err := fetchTools(ctx, c.client, s)
+		tools, err := c.fetchTools(ctx, s)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", s.Name, err))
 			continue
@@ -173,7 +254,33 @@ func (c *Catalog) Tool(qualifiedName string) (Tool, bool) {
 	return Tool{}, false
 }
 
-func fetchTools(ctx context.Context, client *http.Client, s Server) ([]Tool, error) {
+func (c *Catalog) fetchTools(ctx context.Context, s Server) ([]Tool, error) {
+	if s.Transport == TransportMCPSSE {
+		return c.fetchToolsSSE(ctx, s)
+	}
+	return fetchToolsPrivasysHTTP(ctx, c.client, s)
+}
+
+func (c *Catalog) fetchToolsSSE(ctx context.Context, s Server) ([]Tool, error) {
+	cli := c.sseClient(s)
+	mtools, err := cli.ListTools(ctx, c.ttl)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Tool, 0, len(mtools))
+	for _, t := range mtools {
+		out = append(out, Tool{
+			Server:                   s.Name,
+			Name:                     t.Name,
+			Description:              t.Description,
+			InputSchema:              t.InputSchema,
+			RequiresUserConfirmation: s.RequiresUserConfirmation,
+		})
+	}
+	return out, nil
+}
+
+func fetchToolsPrivasysHTTP(ctx context.Context, client *http.Client, s Server) ([]Tool, error) {
 	url := strings.TrimRight(s.BaseURL, "/") + "/api/v1/mcp/tools"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

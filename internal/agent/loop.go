@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -164,9 +165,21 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 			}
 
 			args := json.RawMessage(tc.Function.Arguments)
-			if !json.Valid(args) {
-				// vLLM emits arguments as a JSON STRING containing JSON.
-				// Unwrap the outer string if so.
+			// vLLM commonly emits `arguments` as a JSON STRING containing
+			// the actual JSON object (e.g. "\"{\\\"url\\\":\\\"...\\\"}\"").
+			// json.Valid returns true for such strings, so detect that
+			// shape explicitly and unwrap once.
+			if trimmed := bytes.TrimSpace(args); len(trimmed) > 0 && trimmed[0] == '"' {
+				var s string
+				if err := json.Unmarshal(trimmed, &s); err == nil {
+					if json.Valid([]byte(s)) {
+						args = json.RawMessage(s)
+					} else if s == "" {
+						args = json.RawMessage("{}")
+					}
+				}
+			} else if !json.Valid(args) {
+				// Last-resort: try wrapping as a JSON string and unwrapping.
 				var s string
 				if err := json.Unmarshal([]byte(strconv.Quote(string(tc.Function.Arguments))), &s); err == nil && json.Valid([]byte(s)) {
 					args = json.RawMessage(s)

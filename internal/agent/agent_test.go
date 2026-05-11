@@ -203,7 +203,16 @@ func TestRun_NoToolCalls_Passthrough(t *testing.T) {
 func TestRun_ToolCallLoop(t *testing.T) {
 	f := &fakeMCP{
 		tools: []Tool{{Name: "search"}},
-		answer: func(string, []byte, string) (int, []byte) {
+		answer: func(_ string, body []byte, _ string) (int, []byte) {
+			// vLLM emits arguments as a JSON-string-wrapped JSON object.
+			// The dispatcher MUST unwrap it and post the raw object.
+			var obj map[string]any
+			if err := json.Unmarshal(body, &obj); err != nil {
+				t.Fatalf("dispatcher posted non-object body %q: %v", body, err)
+			}
+			if obj["query"] != "q" {
+				t.Fatalf("dispatcher dropped args, got %v", obj)
+			}
 			return 200, []byte(`{"hits":[{"id":"c1","text":"the answer is 42"}]}`)
 		},
 	}

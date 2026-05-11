@@ -224,9 +224,15 @@ func TestRun_ToolCallLoop(t *testing.T) {
 
 	calls := 0
 	events := []string{}
+	var resultPayload any
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"q"}]}`)
 	final, results, err := Run(context.Background(), d, body, LoopOptions{
-		EmitEvent: func(name string, _ any) { events = append(events, name) },
+		EmitEvent: func(name string, payload any) {
+			events = append(events, name)
+			if name == "tool_result" {
+				resultPayload = payload
+			}
+		},
 		Invoke: func(ctx context.Context, b []byte) ([]byte, error) {
 			calls++
 			if calls == 1 {
@@ -261,6 +267,20 @@ func TestRun_ToolCallLoop(t *testing.T) {
 	}
 	if len(events) != 2 || events[0] != "tool_call" || events[1] != "tool_result" {
 		t.Fatalf("events: %v", events)
+	}
+	// The tool_result event MUST carry the originating tool_call id so
+	// the chat front-end can match it back to the in-flight card.
+	// Without it the card stays "running" until stream end and then
+	// flips to error="cancelled".
+	rp, ok := resultPayload.(map[string]any)
+	if !ok {
+		t.Fatalf("tool_result payload is not a map: %T", resultPayload)
+	}
+	if rp["id"] != "t1" {
+		t.Fatalf("tool_result event missing/wrong id: %+v", rp)
+	}
+	if rp["status"] != "ok" {
+		t.Fatalf("tool_result event missing status: %+v", rp)
 	}
 }
 

@@ -152,7 +152,7 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 					}
 					allResults = append(allResults, denied)
 					if opt.EmitEvent != nil {
-						opt.EmitEvent("tool_result", denied)
+						opt.EmitEvent("tool_result", toolResultEvent(tc.ID, denied))
 					}
 					messages = append(messages, map[string]any{
 						"role":         "tool",
@@ -189,7 +189,7 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 			allResults = append(allResults, result)
 
 			if opt.EmitEvent != nil {
-				opt.EmitEvent("tool_result", result)
+				opt.EmitEvent("tool_result", toolResultEvent(tc.ID, result))
 			}
 
 			messages = append(messages, map[string]any{
@@ -215,6 +215,22 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 		return nil, allResults, fmt.Errorf("vllm final invoke: %w", err)
 	}
 	return respBody, allResults, nil
+}
+
+// toolResultEvent wraps a ToolResult with the originating tool_call id
+// so SSE consumers (chat front-end) can match the result back to the
+// in-flight tool_call card. Without this, the front-end leaves the
+// invocation in "running" state and the post-stream cleanup flips it
+// to error="cancelled".
+func toolResultEvent(id string, r ToolResult) map[string]any {
+	return map[string]any{
+		"id":          id,
+		"name":        r.Name,
+		"status":      r.Status,
+		"result":      r.Result,
+		"error":       r.Error,
+		"duration_ms": r.DurationMs,
+	}
 }
 
 // toolCall mirrors the OpenAI tool_calls[*] shape vLLM produces.

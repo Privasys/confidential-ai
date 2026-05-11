@@ -63,6 +63,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 
 	// Fetch tool catalogue and inject into request.
 	tools, _ := h.agentCatalog.Tools(r.Context())
+	tools = filterToolsByHeader(tools, r.Header.Get("X-Privasys-Tools"))
 	body, err = agent.InjectTools(body, tools)
 	if err != nil {
 		h.requestsFailed.Add(1)
@@ -492,4 +493,31 @@ func addToolCallsToMeta(meta *reproducibility.Metadata, results []agent.ToolResu
 		}
 	}
 	meta.ToolCalls = out
+}
+
+// filterToolsByHeader trims the catalogue to only the servers named in
+// the X-Privasys-Tools header (comma-separated). An empty header keeps
+// every server (default-on behaviour preserved). Unknown server names
+// in the header are silently dropped.
+func filterToolsByHeader(tools []agent.Tool, header string) []agent.Tool {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return tools
+	}
+	allowed := map[string]bool{}
+	for _, name := range strings.Split(header, ",") {
+		if n := strings.TrimSpace(name); n != "" {
+			allowed[n] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return tools
+	}
+	out := tools[:0:0]
+	for _, t := range tools {
+		if allowed[t.Server] {
+			out = append(out, t)
+		}
+	}
+	return out
 }

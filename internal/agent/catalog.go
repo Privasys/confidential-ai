@@ -16,11 +16,14 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -238,6 +241,49 @@ func (c *Catalog) Server(name string) (Server, bool) {
 		}
 	}
 	return Server{}, false
+}
+
+// Servers returns a copy of the configured server list. Used by callers
+// that need to compute attestation digests over the catalogue.
+func (c *Catalog) Servers() []Server {
+	out := make([]Server, len(c.servers))
+	copy(out, c.servers)
+	return out
+}
+
+// ServersDigest is the canonical sha256 over the configured server set
+// (sorted by name; only the security-relevant fields contribute). The
+// hex-encoded result is bound into RA-TLS attestation extension OID
+// 1.3.6.1.4.1.65230.3.7 so a verifier can prove which tool servers the
+// confidential-ai container was configured to talk to.
+func (c *Catalog) ServersDigest() string {
+	type canon struct {
+		Name      string `json:"name"`
+		BaseURL   string `json:"base_url"`
+		Transport string `json:"transport"`
+		AuthMode  string `json:"auth_mode"`
+		Audience  string `json:"audience,omitempty"`
+		Confirm   bool   `json:"confirm,omitempty"`
+	}
+	cs := make([]canon, 0, len(c.servers))
+	for _, s := range c.servers {
+		t := s.Transport
+		if t == "" {
+			t = TransportPrivasysHTTP
+		}
+		cs = append(cs, canon{
+			Name:      s.Name,
+			BaseURL:   s.BaseURL,
+			Transport: t,
+			AuthMode:  s.effectiveAuthMode(),
+			Audience:  s.AuthAudience,
+			Confirm:   s.RequiresUserConfirmation,
+		})
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Name < cs[j].Name })
+	body, _ := json.Marshal(cs)
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 // Tool looks up a single cached tool by qualified name ("<server>__<tool>").

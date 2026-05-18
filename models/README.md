@@ -119,8 +119,8 @@ is loaded.
 
 ## Reasoning & tool calling (Gemma 4)
 
-`Dockerfile.prod` pins **vLLM v0.20.1** (release notes:
-[vllm-project/vllm v0.20.1](https://github.com/vllm-project/vllm/releases/tag/v0.20.1)),
+`Dockerfile.prod` pins **vLLM v0.21.0** (release notes:
+[vllm-project/vllm v0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0)),
 which ships first-class Gemma 4 reasoning + tool-call parsers per the
 [official Gemma 4 thinking recipe](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html).
 The image also bakes the official chat template into
@@ -167,7 +167,8 @@ before `data: [DONE]`.
 
 ### Upgrade requirement
 
-vLLM v0.20.x requires `transformers>=5.5.0`, which is pulled in
+vLLM v0.21.x requires `transformers>=5.5.0` (and formally deprecates
+v4 — migrate any pinned downstream code to v5). The dependency is pulled in
 transitively by the `uv pip install` in `Dockerfile.prod`. CUDA 12.6 is
 still supported via `--torch-backend=cu126`, so the base image
 (`nvidia/cuda:12.6.3-runtime-ubuntu24.04`) does not need to change.

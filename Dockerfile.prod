@@ -76,6 +76,14 @@ LABEL ai.privasys.volume="/mnt:/models:ro"
 
 # Dynamic model loading mode: Go proxy starts immediately, vLLM on-demand.
 ENV MODELS_DIR=/models
+# Pin the version reported in reproducibility metadata to the wheel
+# actually installed above. Without this, entrypoint.sh and config.go
+# fall back to the legacy default ("0.19.1") and the per-response
+# `reproducibility.vllm_version` field is misleading. (The running
+# server is still correct — vLLM's system_fingerprint comes from the
+# wheel itself — but our attestation metadata must agree.)
+ENV VLLM_VERSION=0.21.0
+ENV CUDA_VERSION=12.6.3
 
 EXPOSE 8000 8080
 

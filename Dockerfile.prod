@@ -32,9 +32,16 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 # wheel and crashes at import with
 # `ImportError: libcudart.so.13: cannot open shared object file`.
 
+# cuda-nvcc-12-6 is required at *runtime* because vLLM 0.21.0 pulls in
+# flashinfer-python 0.6.8, which JIT-compiles sampling kernels via nvcc
+# on first inference (the prebuilt wheel does not ship every kernel
+# variant). Without nvcc the engine crashes with
+# `Ninja build failed: /usr/local/cuda/bin/nvcc: not found`.
+# The `cuda-nvcc-12-6` metapackage matches the 12.6 runtime already
+# present in the base image; adds ~1.5 GB.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip ca-certificates curl \
-    gcc libc6-dev && \
+    gcc libc6-dev cuda-nvcc-12-6 && \
     rm -rf /var/lib/apt/lists/*
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1

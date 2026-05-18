@@ -11,9 +11,6 @@ name: Determinism Gate (e2e)
 # Required repo secrets / inputs:
 #   - CONFIDENTIAL_AI_URL: e.g. https://m2-dev-ai.privasys.org
 #   - CONFIDENTIAL_AI_TOKEN: fresh manager-role bearer token
-#
-# See .operations/know-how/manager-jwt.md for the JWT minting recipe
-# (private repo - reach out to platform team if you need access).
 
 on:
   workflow_dispatch:

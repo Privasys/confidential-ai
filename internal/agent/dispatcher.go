@@ -91,8 +91,7 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 // authHeader resolves the Authorization header value for an outbound
 // tool call based on the server's auth_mode. The `exchange` mode is
 // meant to mint a tool-scoped JWT via the Privasys IdP at privasys.id
-// (jwt-bearer grant + audience:<auth_audience> scope, see
-// .operations/ai-platform/ai-tools-plan.md section 11). Until that
+// (jwt-bearer grant + audience:<auth_audience> scope). Until that
 // IdP-side flow lands `exchange` falls back to `forward` semantics so
 // existing in-fleet calls continue to work end-to-end.
 // TODO(ai-tools): mint via Privasys IdP - NOT via management-service.

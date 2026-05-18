@@ -85,6 +85,19 @@ ENV MODELS_DIR=/models
 ENV VLLM_VERSION=0.21.0
 ENV CUDA_VERSION=12.6.3
 
+# Disable DeepGEMM FP8 JIT path. vLLM v0.21.0 ships bundled DeepGEMM
+# kernels that JIT-compile via nvcc at first inference for native FP8
+# models (e.g. Qwen3.6-35B-A3B-FP8) on Hopper. With the CUDA 12.6
+# devel toolkit baked in, the JIT compile aborts with:
+#   "Assertion error ... false and 'NVCC compilation failed'"
+#   (vllm/utils/deep_gemm.py:295 fp8_gemm_nt -> third_party/deep_gemm).
+# Until we ship a vetted DeepGEMM build (or vLLM ships prebuilt FP8
+# kernels for the variants it enables by default), force vLLM to use
+# its CUTLASS/Triton FP8 backends instead, which work out of the box.
+# Cost: ~10–20% throughput on FP8 MoE; correctness unchanged.
+ENV VLLM_USE_DEEP_GEMM=0
+ENV VLLM_MOE_USE_DEEP_GEMM=0
+
 EXPOSE 8000 8080
 
 ENTRYPOINT ["/opt/confidential-ai/entrypoint.sh"]

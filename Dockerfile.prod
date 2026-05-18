@@ -8,7 +8,21 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/
 
 # ---
 
-FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+# Use the CUDA *devel* image (not runtime) so that vLLM 0.21.0's
+# flashinfer-python dependency can JIT-compile its sampling kernels
+# at first inference. flashinfer ships a prebuilt wheel but lazily
+# generates additional kernel variants via nvcc at runtime, and those
+# need:
+#   - nvcc                          (cuda-nvcc-12-6)
+#   - curand.h, cublas.h, ...        (libcurand-dev, libcublas-dev, ...)
+#   - cudart development headers     (cuda-cudart-dev-12-6)
+# rather than play whack-a-mole with -dev packages on top of the
+# runtime image, switching to -devel pulls the full CUDA 12.6 toolkit
+# (matches our runtime version) in one go.
+# Cost: image ~3 GB larger; unavoidable until flashinfer ships fully
+# precompiled kernels for the variants vLLM 0.21.0 enables by default
+# (FlashInfer top-k/top-p sampler).
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
 # vLLM v0.21.0 — adds Qwen3.5/Qwen3.6 Gated DeltaNet support, Gemma4
 # MoE/tool-parser fixes, MTP for Gemma4, and FlashInfer top-k/top-p
@@ -32,16 +46,9 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 # wheel and crashes at import with
 # `ImportError: libcudart.so.13: cannot open shared object file`.
 
-# cuda-nvcc-12-6 is required at *runtime* because vLLM 0.21.0 pulls in
-# flashinfer-python 0.6.8, which JIT-compiles sampling kernels via nvcc
-# on first inference (the prebuilt wheel does not ship every kernel
-# variant). Without nvcc the engine crashes with
-# `Ninja build failed: /usr/local/cuda/bin/nvcc: not found`.
-# The `cuda-nvcc-12-6` metapackage matches the 12.6 runtime already
-# present in the base image; adds ~1.5 GB.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip ca-certificates curl \
-    gcc libc6-dev cuda-nvcc-12-6 && \
+    gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1

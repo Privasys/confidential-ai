@@ -71,6 +71,14 @@ type LoadRequest struct {
 	// reasoning is on for every request unless the caller opts out via
 	// `chat_template_kwargs`. Required by the Gemma 4 thinking recipe.
 	EnableThinking bool `json:"enable_thinking,omitempty"`
+
+	// MaxNumSeqs caps vLLM's `--max-num-seqs`. Required for
+	// linear-attention / Mamba-cache models (e.g. Qwen3.6-35B-A3B with
+	// Gated DeltaNet) where each in-flight sequence consumes one Mamba
+	// cache block: vLLM aborts CUDA graph capture with
+	// `max_num_seqs exceeds available Mamba cache blocks` when the
+	// default (1024) is too large for the GPU. 0 means vLLM default.
+	MaxNumSeqs int `json:"max_num_seqs,omitempty"`
 }
 
 // Status is the response for GET /v1/models/status.
@@ -372,6 +380,9 @@ func (m *Manager) doLoad(req LoadRequest) {
 		"--gpu-memory-utilization", fmt.Sprintf("%.2f", req.GPUMemoryUtilization),
 		"--dtype", req.Dtype,
 		"--port", fmt.Sprintf("%d", m.vllmPort),
+	}
+	if req.MaxNumSeqs > 0 {
+		args = append(args, "--max-num-seqs", fmt.Sprintf("%d", req.MaxNumSeqs))
 	}
 	if req.Quantization != "" && req.Quantization != "none" {
 		args = append(args, "--quantization", req.Quantization)

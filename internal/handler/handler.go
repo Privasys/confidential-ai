@@ -59,14 +59,24 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	}
 	if servers, err := agent.ParseServerSpec(cfg.MCPServers); err != nil {
 		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", err)
-	} else if len(servers) > 0 {
+	} else if len(servers) > 0 || cfg.ToolSpecURL != "" {
+		// The catalogue is always created when the puller is enabled,
+		// even if the static MCP_SERVERS is empty: the puller will
+		// populate it on first poll and may continue to mutate it as
+		// the fleet's tool set changes.
 		h.agentCatalog = agent.NewCatalog(servers, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
 		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, &http.Client{Timeout: 60 * time.Second})
 		h.agentConsent = agent.NewConsentRegistry()
-		log.Printf("[agent] enabled with %d MCP server(s)", len(servers))
+		log.Printf("[agent] enabled (static-servers=%d, puller=%v)", len(servers), cfg.ToolSpecURL != "")
 	}
 	return h
 }
+
+// AgentCatalog exposes the live agent catalogue so external goroutines
+// (e.g. the tool-spec puller in cmd/server) can mutate it via
+// Catalog.Replace. Returns nil when the agentic loop is disabled (no
+// MCP_SERVERS and no --tool-spec-url).
+func (h *Handler) AgentCatalog() *agent.Catalog { return h.agentCatalog }
 
 // pollUpstreamReady polls vLLM's /health endpoint until it returns 200,
 // then sets h.ready to 1. This runs in the background so the proxy can

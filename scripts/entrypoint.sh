@@ -43,7 +43,11 @@ if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
     --tee-type "${TEE_TYPE:-tdx}" \
     --cuda-version "${CUDA_VERSION:-13.0}" \
     --vllm-version "${VLLM_VERSION:-0.19.1}" \
-    --image-digest "${IMAGE_DIGEST:-}"
+    --image-digest "${IMAGE_DIGEST:-}" \
+    --mcp-servers "${MCP_SERVERS:-}" \
+    --tool-spec-url "${TOOL_SPEC_URL:-}" \
+    --tool-spec-token "${TOOL_SPEC_TOKEN:-}" \
+    --tool-spec-interval "${TOOL_SPEC_INTERVAL:-60s}"
 fi
 
 # --- Legacy mode: start vLLM at boot with MODEL_URL/MODEL_NAME -----------

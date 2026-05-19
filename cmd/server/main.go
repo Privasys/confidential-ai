@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/privasys/confidential-ai/internal/agent/specsync"
 	"github.com/privasys/confidential-ai/internal/config"
 	"github.com/privasys/confidential-ai/internal/handler"
 	"github.com/privasys/confidential-ai/internal/models"
@@ -41,6 +45,25 @@ func main() {
 	h := handler.New(cfg, modelMgr)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
+
+	// Tool-spec puller: when --tool-spec-url is set, poll it and hot-
+	// reload the agent catalogue. The puller owns its own goroutine
+	// cancelled by ctx on shutdown. Disabled when AgentCatalog() is
+	// nil (no MCP_SERVERS and no --tool-spec-url).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if cfg.ToolSpecURL != "" {
+		if cat := h.AgentCatalog(); cat != nil {
+			s := specsync.New(cfg.ToolSpecURL, cfg.ToolSpecToken, cfg.ToolSpecInterval, nil, cat)
+			go s.Run(ctx)
+			logJSON("info", "tool-spec puller started", map[string]string{
+				"url":      cfg.ToolSpecURL,
+				"interval": cfg.ToolSpecInterval.String(),
+			})
+		} else {
+			logJSON("warn", "tool-spec-url set but agent catalogue is nil; puller skipped", nil)
+		}
+	}
 
 	logJSON("info", "confidential-ai server starting", map[string]string{
 		"listen":       cfg.Listen,

@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"os"
+	"time"
 )
 
 // Config holds all server configuration.
@@ -54,6 +55,29 @@ type Config struct {
 	// (pure pass-through to vLLM).
 	MCPServers string
 
+	// ToolSpecURL, when non-empty, enables the background tool-spec
+	// puller. The proxy polls this URL every ToolSpecInterval and
+	// atomically replaces the agent.Catalog's server list with the
+	// returned spec string (see internal/agent/spec.go::ParseServerSpec
+	// for format). This is how managed instances (e.g. confidential-ai
+	// running inside an enclave alongside the workload manager) pick
+	// up fleet-level tool-set changes without a container restart.
+	//
+	// The endpoint must return JSON: {"spec":"...","generation":"..."}.
+	// When ToolSpecURL is empty the puller is disabled and the tool
+	// catalogue is fixed to whatever MCPServers resolved to at startup.
+	ToolSpecURL string
+
+	// ToolSpecToken, when non-empty, is sent as `Authorization: Bearer
+	// <token>` on every ToolSpecURL poll. Typically a static
+	// machine-to-machine credential issued to the enclave by the
+	// management service.
+	ToolSpecToken string
+
+	// ToolSpecInterval is the polling cadence for ToolSpecURL.
+	// Defaults to 60s when zero. Ignored when ToolSpecURL is empty.
+	ToolSpecInterval time.Duration
+
 	// CORSOrigins is a comma-separated allowlist of HTTP Origins that
 	// receive Access-Control-Allow-* response headers. Defaults to the
 	// Privasys chat front-ends. Empty disables CORS entirely (browser
@@ -99,6 +123,12 @@ func Parse(args []string) (*Config, error) {
 		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
+	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),
+		"When set, the proxy polls this URL for {spec,generation} and hot-reloads the tool catalogue (env: TOOL_SPEC_URL)")
+	fs.StringVar(&cfg.ToolSpecToken, "tool-spec-token", envOr("TOOL_SPEC_TOKEN", ""),
+		"Bearer token sent on every tool-spec-url poll (env: TOOL_SPEC_TOKEN)")
+	fs.DurationVar(&cfg.ToolSpecInterval, "tool-spec-interval", envDuration("TOOL_SPEC_INTERVAL", 60*time.Second),
+		"How often to poll tool-spec-url (env: TOOL_SPEC_INTERVAL, e.g. 30s)")
 	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat-test.privasys.org,http://localhost:4210,http://localhost:3000"),
 		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
 
@@ -113,4 +143,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }

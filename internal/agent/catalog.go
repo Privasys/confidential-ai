@@ -196,6 +196,26 @@ func (c *Catalog) Close() {
 	c.sseClients = map[string]*mcpsse.Client{}
 }
 
+// Replace atomically swaps the configured server list. The tool cache
+// is invalidated so the next Tools() call repopulates from the new set,
+// and any persistent SSE sessions are torn down (they'll be re-opened
+// lazily against the new servers on next use). Callers may pass nil or
+// an empty slice to disable tools entirely.
+//
+// Safe to call concurrently with Tools(); the next reader observes the
+// new set atomically.
+func (c *Catalog) Replace(servers []Server) {
+	dup := make([]Server, len(servers))
+	copy(dup, servers)
+	c.mu.Lock()
+	c.servers = dup
+	c.lastFetch = time.Time{}
+	c.cached = nil
+	c.cachedErr = nil
+	c.mu.Unlock()
+	c.Close()
+}
+
 // Tools returns the merged tool list. If the cache is fresh, it is
 // returned as-is; otherwise every server is queried in serial (small N).
 // On per-server failure, that server's tools are dropped from the result
@@ -235,6 +255,8 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 
 // Server looks up a configured server by name.
 func (c *Catalog) Server(name string) (Server, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, s := range c.servers {
 		if s.Name == name {
 			return s, true
@@ -246,6 +268,8 @@ func (c *Catalog) Server(name string) (Server, bool) {
 // Servers returns a copy of the configured server list. Used by callers
 // that need to compute attestation digests over the catalogue.
 func (c *Catalog) Servers() []Server {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	out := make([]Server, len(c.servers))
 	copy(out, c.servers)
 	return out
@@ -257,6 +281,7 @@ func (c *Catalog) Servers() []Server {
 // 1.3.6.1.4.1.65230.3.7 so a verifier can prove which tool servers the
 // confidential-ai container was configured to talk to.
 func (c *Catalog) ServersDigest() string {
+	servers := c.Servers()
 	type canon struct {
 		Name      string `json:"name"`
 		BaseURL   string `json:"base_url"`
@@ -265,8 +290,8 @@ func (c *Catalog) ServersDigest() string {
 		Audience  string `json:"audience,omitempty"`
 		Confirm   bool   `json:"confirm,omitempty"`
 	}
-	cs := make([]canon, 0, len(c.servers))
-	for _, s := range c.servers {
+	cs := make([]canon, 0, len(servers))
+	for _, s := range servers {
 		t := s.Transport
 		if t == "" {
 			t = TransportPrivasysHTTP

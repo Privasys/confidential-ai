@@ -186,6 +186,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.chatCompletionsAgentic(w, r)
 			return
 		}
+		// Client supplied its own tools (e.g. Zed). It speaks plain
+		// OpenAI streaming and cannot parse our `reproducibility` SSE
+		// event — its stream parser rejects any non-chat-chunk `data:`
+		// frame. Use the strict pass-through path.
+		h.proxyPassthrough(w, r, "/v1/chat/completions")
+		return
 	}
 	h.proxyWithReproducibility(w, r, "/v1/chat/completions")
 }
@@ -207,6 +213,101 @@ func hasClientTools(body []byte) bool {
 // completions proxies to vLLM /v1/completions with reproducibility.
 func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 	h.proxyWithReproducibility(w, r, "/v1/completions")
+}
+
+// proxyPassthrough forwards the request to vLLM and streams the
+// response back verbatim, WITHOUT injecting the reproducibility
+// metadata event. Used for OpenAI-compatible clients that supply
+// their own tools and whose strict stream parsers reject any `data:`
+// frame that is not a `chat.completion.chunk`.
+func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string) {
+	if !h.IsReady() {
+		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		return
+	}
+	h.requestsTotal.Add(1)
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	// Still inject seed=0 default so determinism guarantees hold even
+	// on the pass-through path.
+	var reqParams requestParams
+	if err := json.Unmarshal(body, &reqParams); err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+	seed := int64(0)
+	if reqParams.Seed != nil {
+		seed = *reqParams.Seed
+	}
+	reqWithSeed, err := injectSeed(body, seed)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject seed")
+		return
+	}
+
+	upstream := h.cfg.VLLMUpstream + path
+	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream, bytes.NewReader(reqWithSeed))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, "failed to create upstream request")
+		return
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.client.Do(proxyReq)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("vLLM upstream error: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if !reqParams.Stream {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 // models proxies the /v1/models endpoint directly.

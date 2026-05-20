@@ -162,12 +162,46 @@ func subtleEq(a, b string) bool {
 
 // chatCompletions proxies to vLLM /v1/chat/completions and injects
 // reproducibility metadata into the response.
+//
+// When an MCP-backed agent dispatcher is configured we normally run the
+// bounded tool-call loop so the server can execute tools on behalf of
+// the client. That assumes ALL `tools` in the request are server-side
+// (the chat UI sends none and lets us inject our catalogue). Clients
+// like Zed send their OWN client-side tools (e.g. `list_directory`) and
+// expect to dispatch them themselves: they want the raw OpenAI SSE with
+// `tool_calls` deltas, NOT our `tool_call` / `tool_result` events, and
+// our dispatcher would otherwise reject the unknown names with
+// "malformed tool name (expected <server>__<tool>)". Detect that case
+// and use the plain pass-through proxy instead.
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.agentDispatcher != nil {
-		h.chatCompletionsAgentic(w, r)
-		return
+		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+		if err != nil {
+			h.requestsFailed.Add(1)
+			writeError(w, http.StatusBadRequest, "failed to read request body")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if !hasClientTools(body) {
+			h.chatCompletionsAgentic(w, r)
+			return
+		}
 	}
 	h.proxyWithReproducibility(w, r, "/v1/chat/completions")
+}
+
+// hasClientTools reports whether the request body contains a non-empty
+// `tools` array, indicating the caller is supplying client-side tools
+// and expects vendor-standard OpenAI tool_call streaming (no server-
+// side dispatch).
+func hasClientTools(body []byte) bool {
+	var probe struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return len(probe.Tools) > 0
 }
 
 // completions proxies to vLLM /v1/completions with reproducibility.

@@ -418,3 +418,23 @@ if rec.Code == http.StatusUnauthorized {
 t.Fatalf("expected auth bypassed, got 401: %s", rec.Body.String())
 }
 }
+
+func TestHasClientTools(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"no tools", `{"model":"x","messages":[]}`, false},
+		{"empty tools", `{"model":"x","tools":[]}`, false},
+		{"with tools", `{"model":"x","tools":[{"type":"function","function":{"name":"list_directory"}}]}`, true},
+		{"invalid json", `not json`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasClientTools([]byte(c.body)); got != c.want {
+				t.Fatalf("hasClientTools(%q) = %v, want %v", c.body, got, c.want)
+			}
+		})
+	}
+}

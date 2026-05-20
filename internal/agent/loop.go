@@ -98,8 +98,37 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 			return nil, allResults, fmt.Errorf("parse response iter %d: %w", i, err)
 		}
 		if len(toolCalls) == 0 {
-			// No more tool calls: return the model's final response.
-			return respBody, allResults, nil
+			// No more tool calls. If the model produced an actual
+			// user-visible answer, return it. If it returned an
+			// empty content (a known failure mode for thinking
+			// models like Qwen3 that occasionally place the entire
+			// answer inside <think>…</think> with nothing after the
+			// closing tag, leaving `content == ""`), do one more
+			// no-tools call with an explicit instruction so the
+			// user always sees a final answer.
+			if !assistantContentIsEmpty(assistantMsg) {
+				return respBody, allResults, nil
+			}
+			messages, _ := req["messages"].([]any)
+			messages = append(messages, assistantMsg, map[string]any{
+				"role":    "system",
+				"content": "Your previous reply contained only internal reasoning (inside <think>…</think>) and no user-visible answer. Reply again with a concise, user-facing final answer in plain Markdown. Do NOT use <think> tags this time — just the answer.",
+			})
+			req["messages"] = messages
+			delete(req, "tools")
+			delete(req, "tool_choice")
+			finalBody, ferr := json.Marshal(req)
+			if ferr != nil {
+				return nil, allResults, fmt.Errorf("marshal reprompt: %w", ferr)
+			}
+			respBody2, ierr := opt.Invoke(ctx, finalBody)
+			if ierr != nil {
+				// Reprompt failed — return the original (possibly
+				// empty) response rather than swallowing the
+				// model output entirely.
+				return respBody, allResults, nil
+			}
+			return respBody2, allResults, nil
 		}
 
 		// Append the assistant message (with tool_calls) to history.
@@ -200,6 +229,14 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 			})
 		}
 		req["messages"] = messages
+		// After the first turn we no longer want to FORCE another tool
+		// call: the model needs to be free to summarise. InjectTools
+		// defaults tool_choice to "required" to coerce stubborn models
+		// into emitting a structured first call; switch back to "auto"
+		// now that we have tool output to feed in.
+		if tc, ok := req["tool_choice"].(string); ok && tc == "required" {
+			req["tool_choice"] = "auto"
+		}
 	}
 
 	// Cap reached: make one final non-tool call by removing tools so the
@@ -274,6 +311,20 @@ func parseToolCalls(respBody []byte) ([]toolCall, map[string]any, error) {
 	return calls, msg, nil
 }
 
+// assistantContentIsEmpty reports whether the assistant message has no
+// user-visible content. Used to detect thinking-model replies that
+// emitted only reasoning (e.g. an unclosed <think>…</think> wrapping
+// the whole answer) so the loop can reprompt for a real final answer.
+// A non-empty `reasoning_content`/`reasoning` field is intentionally
+// NOT enough — that channel is hidden from most clients.
+func assistantContentIsEmpty(msg map[string]any) bool {
+	if msg == nil {
+		return true
+	}
+	c, _ := msg["content"].(string)
+	return strings.TrimSpace(c) == ""
+}
+
 // InjectTools merges the catalogue into a chat completion request body in
 // the OpenAI tools-array shape vLLM accepts. If the request already
 // contains a non-empty `tools` array, the catalogue is appended (request
@@ -317,7 +368,16 @@ func InjectTools(body []byte, tools []Tool) ([]byte, error) {
 	}
 	req["tools"] = existing
 	if _, ok := req["tool_choice"]; !ok {
-		req["tool_choice"] = "auto"
+		// Force a tool call on the FIRST turn. Several open-weight
+		// fine-tunes (Qwen-3 thinking, Gemma) ignore the OpenAI `tools`
+		// array in `auto` mode and emit a free-form markdown answer
+		// instead of a structured tool_calls array. `required` flips
+		// vLLM into guided-decoding mode, which reliably produces a
+		// well-formed tool_calls payload regardless of the model's own
+		// fine-tune. agent.Run downgrades to `auto` after the first
+		// dispatch so the model can choose to stop calling tools and
+		// produce the final summary.
+		req["tool_choice"] = "required"
 	}
 
 	// Nudge the model with a short system message describing the available

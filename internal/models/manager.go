@@ -368,6 +368,29 @@ func (m *Manager) doLoad(req LoadRequest) {
 		}
 	}
 
+	// Qwen3 / Qwen3.5 / Qwen3.6 are thinking models: without
+	// `--reasoning-parser qwen3` vLLM emits the entire `<think>…</think>`
+	// block as plain `content`, the chat UI's splitReasoning() routes it
+	// to the Thought-process panel, and any reply where the model puts
+	// everything inside <think> (a common Qwen3 failure mode for short
+	// agentic prompts) renders as an empty assistant message. Tool calls
+	// also need `--tool-call-parser hermes` (Qwen3 reuses the Hermes
+	// tool-call schema) plus `--enable-auto-tool-choice`. The same
+	// override-wins-if-set policy as gemma4 above.
+	lname := strings.ToLower(req.Model)
+	if strings.Contains(lname, "qwen3") || strings.Contains(lname, "qwen36") || strings.Contains(lname, "qwen35") {
+		if req.ReasoningParser == "" {
+			req.ReasoningParser = "qwen3"
+		}
+		if req.ToolCallParser == "" {
+			req.ToolCallParser = "hermes"
+			req.EnableAutoToolChoice = true
+		}
+		if !req.EnableThinking {
+			req.EnableThinking = true
+		}
+	}
+
 	args := []string{
 		"serve", modelPath,
 		"--served-model-name", req.Model,

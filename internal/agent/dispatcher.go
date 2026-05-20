@@ -166,6 +166,16 @@ type ToolResult struct {
 	DurationMs int64           `json:"duration_ms"`
 }
 
+// MaxToolResultBytes caps the size of a single tool-result payload
+// re-fed into the model's context. A large LightPanda page fetch or
+// RAG response would otherwise blow past the model's `max_model_len`,
+// leaving no room for the assistant's reply — the user-visible symptom
+// is "thought process shown, no final answer" because the entire token
+// budget gets consumed in the reasoning channel before any content can
+// be emitted. The SSE `tool_result` event still carries the full
+// payload to the front-end, so this cap is invisible to the user.
+const MaxToolResultBytes = 32 * 1024
+
 // AsToolMessageContent renders the result as a string suitable for the
 // `content` of an OpenAI-compatible `tool` role message.
 func (r ToolResult) AsToolMessageContent() string {
@@ -174,7 +184,11 @@ func (r ToolResult) AsToolMessageContent() string {
 		b, _ := json.Marshal(map[string]string{"error": r.Error})
 		return string(b)
 	}
-	return string(r.Result)
+	s := string(r.Result)
+	if len(s) > MaxToolResultBytes {
+		s = s[:MaxToolResultBytes] + "\n\n[truncated: tool result exceeded 32KB; ask the user to narrow the query if more detail is needed]"
+	}
+	return s
 }
 
 func errResult(name, msg string, started time.Time) ToolResult {

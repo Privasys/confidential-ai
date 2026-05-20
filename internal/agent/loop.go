@@ -110,8 +110,13 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 				return respBody, allResults, nil
 			}
 			messages, _ := req["messages"].([]any)
+			// Use role=user (not system) for the reprompt: Qwen3's
+			// chat template throws "System message must be at the
+			// beginning" if a system message appears after the first
+			// turn, which would make the reprompt fail and the user
+			// see an empty assistant reply.
 			messages = append(messages, assistantMsg, map[string]any{
-				"role":    "system",
+				"role":    "user",
 				"content": "Your previous reply contained only internal reasoning (inside <think>…</think>) and no user-visible answer. Reply again with a concise, user-facing final answer in plain Markdown. Do NOT use <think> tags this time — just the answer.",
 			})
 			req["messages"] = messages

@@ -89,6 +89,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"hi"}],"temperature":0.7}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Privasys-Reproducibility", "1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -180,6 +181,7 @@ func TestCompletionsEndpoint(t *testing.T) {
 	body := `{"prompt":"hello","temperature":0.5,"seed":42}`
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Privasys-Reproducibility", "1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -283,6 +285,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"hi"}],"temperature":0.7,"stream":true}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Privasys-Reproducibility", "1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -436,5 +439,72 @@ func TestHasClientTools(t *testing.T) {
 				t.Fatalf("hasClientTools(%q) = %v, want %v", c.body, got, c.want)
 			}
 		})
+	}
+}
+
+func TestChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "hi"}}},
+		})
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{VLLMUpstream: vllm.URL, ModelName: "m", TeeType: "tdx"}, nil)
+	h.ready.Store(1)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	// no X-Privasys-Reproducibility header => OpenAI-shape pass-through
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resp["reproducibility"]; ok {
+		t.Fatalf("reproducibility must be absent without opt-in header, got: %v", resp)
+	}
+}
+
+func TestStreamingChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"index\":0}]}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{VLLMUpstream: vllm.URL, ModelName: "m", TeeType: "tdx"}, nil)
+	h.ready.Store(1)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "reproducibility") {
+		t.Fatalf("reproducibility frame must be absent without opt-in header:\n%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing [DONE] terminator:\n%s", body)
 	}
 }

@@ -92,6 +92,7 @@ func TestAgenticChatCompletions(t *testing.T) {
 	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"what is the answer"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer user-jwt")
+	req.Header.Set("X-Privasys-Reproducibility", "1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

@@ -179,10 +179,17 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 
 	meta := h.buildMetadata(reqParams)
 	addToolCallsToMeta(meta, results)
+	wantRepro := wantsReproducibility(r)
 
 	if !streaming {
 		var vllmResp map[string]any
 		if err := json.Unmarshal(finalBody, &vllmResp); err != nil {
+			if !wantRepro {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write(finalBody)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]any{
@@ -191,7 +198,9 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			})
 			return
 		}
-		vllmResp["reproducibility"] = meta
+		if wantRepro {
+			vllmResp["reproducibility"] = meta
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(vllmResp)
@@ -200,10 +209,12 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 
 	// Streaming: the assistant content was already forwarded chunk-by-
 	// chunk to the client by callVLLMStream. We just need to append the
-	// reproducibility metadata and the terminator.
-	metaJSON, _ := json.Marshal(map[string]any{"reproducibility": meta})
+	// reproducibility metadata (opt-in) and the terminator.
 	writeMu.Lock()
-	fmt.Fprintf(w, "data: %s\n\n", metaJSON)
+	if wantRepro {
+		metaJSON, _ := json.Marshal(map[string]any{"reproducibility": meta})
+		fmt.Fprintf(w, "data: %s\n\n", metaJSON)
+	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	writeMu.Unlock()

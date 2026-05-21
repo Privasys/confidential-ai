@@ -420,15 +420,27 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		h.cfg.TeeType,
 	)
 
+	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
-		h.proxyStream(w, resp, meta)
+		h.proxyStream(w, resp, meta, wantRepro)
 	} else {
-		h.proxyNonStream(w, resp, meta)
+		h.proxyNonStream(w, resp, meta, wantRepro)
 	}
 }
 
+// wantsReproducibility reports whether the caller opted in to the
+// privasys-specific reproducibility extension. Without the opt-in we
+// emit a stock OpenAI response so strict clients (e.g. Zed) don't
+// reject the trailing `data: {"reproducibility":...}` SSE frame.
+// Our chat front-end and SDK set this header; OpenAI-compatible
+// integrations don't.
+func wantsReproducibility(r *http.Request) bool {
+	v := r.Header.Get("X-Privasys-Reproducibility")
+	return v != "" && v != "0" && !strings.EqualFold(v, "false")
+}
+
 // proxyNonStream handles non-streaming responses: read full body, inject metadata.
-func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata) {
+func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MiB limit
 	if err != nil {
 		h.requestsFailed.Add(1)
@@ -440,6 +452,14 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 	if resp.StatusCode != http.StatusOK {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	if !wantRepro {
+		// Pass the upstream body through verbatim.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		w.Write(respBody)
 		return
 	}
@@ -484,7 +504,7 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 // We also short-circuit `data: [DONE]` so the metadata event is
 // emitted *before* the sentinel even when vLLM packs both lines into
 // one TCP read.
-func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata) {
+func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool) {
 	if resp.StatusCode != http.StatusOK {
 		// Error responses are not streamed; read and pass through.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -509,6 +529,9 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 	br := bufio.NewReaderSize(resp.Body, 64*1024)
 
 	emitMeta := func() {
+		if !wantRepro {
+			return
+		}
 		metaJSON, err := json.Marshal(map[string]any{"reproducibility": meta})
 		if err != nil {
 			return

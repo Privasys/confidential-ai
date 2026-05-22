@@ -357,9 +357,16 @@ func (m *Manager) doLoad(req LoadRequest) {
 	//     any prompt up to --max-model-len fits in a single
 	//     mathematical block.
 	//
-	//   * --max-num-batched-tokens is set to max(16384, 2*max-model-len)
-	//     so the entire prompt is processed in one prefill step
-	//     (no inter-chunk reductions).
+	//   * --max-num-batched-tokens is set to max(16384, max-model-len)
+	//     so the entire prompt fits in a single prefill step. With
+	//     --no-enable-chunked-prefill above, vLLM won't split a
+	//     prefill regardless of MNBT, so making MNBT *larger* than
+	//     max_model_len buys nothing and ONLY inflates profile_run's
+	//     dummy forward (vLLM does a peak-memory probe of MNBT
+	//     tokens at startup). Earlier this was set to 2*max-model-len,
+	//     which halved the achievable context on a fixed-VRAM GPU:
+	//     activations dominate at large MNBT and OOM'd inside
+	//     profile_run long before max_model_len became the bottleneck.
 	//
 	// What this still does NOT guarantee: batch-invariance. With
 	// continuous batching, two concurrent requests may see
@@ -368,7 +375,7 @@ func (m *Manager) doLoad(req LoadRequest) {
 	// concurrent determinism we need batch-invariant kernels
 	// (FlashInfer / vLLM batch-invariant attention), tracked
 	// separately.
-	batchedTokens := req.MaxModelLen * 2
+	batchedTokens := req.MaxModelLen
 	if batchedTokens < 16384 {
 		batchedTokens = 16384
 	}

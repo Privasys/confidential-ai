@@ -634,15 +634,24 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 	m.message = "Waiting for vLLM to become ready..."
 	m.mu.Unlock()
 
-	// 30-minute cap: vLLM weight load is ~5 min for our largest model
+	// 15-minute cap: vLLM weight load is ~5 min for our largest model
 	// but the FIRST inference after a fresh start triggers FlashInfer's
 	// per-architecture JIT compile (GDN sm_90a kernels for Qwen Gated
 	// DeltaNet, ~66 .cu files via nvcc). On a cold container overlay
 	// (e.g. after Spot preempt or `restart`) the JIT cache at
 	// /root/.cache/flashinfer is empty and the compile takes ~8 min on
-	// top of weight load — well past the old 10 min cap. Once the cache
-	// is warm the same model is ready in ~2 min.
-	for i := 0; i < 360; i++ {
+	// top of weight load. Once the cache is warm the same model is
+	// ready in ~2 min.
+	//
+	// We previously waited 30 min here to leave a wide safety margin
+	// over a cold compile, but in practice any failure mode worth
+	// waiting for already manifests inside ~12 min (cold compile +
+	// weight load). Misconfigurations that will never become ready
+	// (e.g. max_model_len too large → vLLM OOMs during profile_run)
+	// hold the lock the whole time and block other loads / restarts
+	// for nothing, so cap at 15 min: still 2× a cold compile, but
+	// fails an OOM-bound load in a reasonable window.
+	for i := 0; i < 180; i++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -659,7 +668,7 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("vLLM not ready after 30 minutes")
+	return fmt.Errorf("vLLM not ready after 15 minutes")
 }
 
 // lookupVerityRoothash returns the dm-verity root hash for the given model

@@ -301,19 +301,117 @@ func parseToolCalls(respBody []byte) ([]toolCall, map[string]any, error) {
 	}
 	msg := resp.Choices[0].Message
 	rawCalls, ok := msg["tool_calls"].([]any)
-	if !ok || len(rawCalls) == 0 {
-		return nil, msg, nil
+	if ok && len(rawCalls) > 0 {
+		// Re-marshal -> unmarshal into typed shape.
+		b, err := json.Marshal(rawCalls)
+		if err != nil {
+			return nil, msg, err
+		}
+		var calls []toolCall
+		if err := json.Unmarshal(b, &calls); err != nil {
+			return nil, msg, err
+		}
+		return calls, msg, nil
 	}
-	// Re-marshal -> unmarshal into typed shape.
-	b, err := json.Marshal(rawCalls)
-	if err != nil {
-		return nil, msg, err
+	// Fallback: vLLM 0.21's `tool_choice:"required"` guided-decoding
+	// path emits the call as a JSON literal into `content` instead of
+	// populating `tool_calls`, completely bypassing the per-model
+	// tool-call parser (qwen3_coder, hermes, gemma4, …). Rescue any
+	// well-formed tool call we find embedded in `content` so the loop
+	// can dispatch it. The parser is intentionally tolerant of both
+	// the OpenAI shape `{"name":X,"arguments":{...}}` and the Qwen3
+	// guided-decoding shape `{"name":X,"parameters":{...}}`, single
+	// objects and arrays, optionally wrapped in markdown fences or
+	// preamble.
+	if calls := extractToolCallsFromContent(msg); len(calls) > 0 {
+		// Clear the leaked JSON from content so the assistant
+		// turn appended to history (and shown to the user when the
+		// loop later replays history for the final summary) is not
+		// littered with the raw call.
+		msg["content"] = ""
+		// Reflect the rescued calls in tool_calls so downstream
+		// stream-replay logic (e.g. addToolCallsToMeta) sees them.
+		mirror := make([]any, 0, len(calls))
+		for _, c := range calls {
+			mirror = append(mirror, map[string]any{
+				"id":   c.ID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      c.Function.Name,
+					"arguments": string(c.Function.Arguments),
+				},
+			})
+		}
+		msg["tool_calls"] = mirror
+		return calls, msg, nil
 	}
-	var calls []toolCall
-	if err := json.Unmarshal(b, &calls); err != nil {
-		return nil, msg, err
+	return nil, msg, nil
+}
+
+// contentJSONBlockRE matches the first balanced JSON object or array in
+// the assistant content. We deliberately use a non-greedy regex against
+// the outer brackets and validate by attempting json.Unmarshal so a
+// malformed block falls through to the natural-language path instead of
+// crashing the loop.
+var contentJSONBlockRE = regexp.MustCompile(`(?s)(\[\s*\{.*\}\s*\]|\{[^{}]*"name"\s*:\s*"[^"]+"[^{}]*\})`)
+
+// extractToolCallsFromContent rescues tool calls that vLLM's
+// guided-decoding `tool_choice:"required"` path leaks into the
+// assistant's `content` instead of `tool_calls`. Returns an empty slice
+// when no recognisable call is present.
+func extractToolCallsFromContent(msg map[string]any) []toolCall {
+	content, _ := msg["content"].(string)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
 	}
-	return calls, msg, nil
+	// Strip a leading ```json / ``` markdown fence (some models wrap
+	// the call) so the regex sees the bare JSON.
+	if strings.HasPrefix(content, "```") {
+		if i := strings.Index(content, "\n"); i >= 0 {
+			content = content[i+1:]
+		}
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+	}
+	m := contentJSONBlockRE.FindString(content)
+	if m == "" {
+		return nil
+	}
+	// Try array shape first, then single object.
+	type rawCall struct {
+		Name       string          `json:"name"`
+		Arguments  json.RawMessage `json:"arguments,omitempty"`
+		Parameters json.RawMessage `json:"parameters,omitempty"`
+	}
+	var arr []rawCall
+	if err := json.Unmarshal([]byte(m), &arr); err != nil {
+		var one rawCall
+		if err := json.Unmarshal([]byte(m), &one); err != nil {
+			return nil
+		}
+		arr = []rawCall{one}
+	}
+	out := make([]toolCall, 0, len(arr))
+	for i, r := range arr {
+		if r.Name == "" {
+			continue
+		}
+		args := r.Arguments
+		if len(args) == 0 {
+			args = r.Parameters
+		}
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		var tc toolCall
+		tc.ID = fmt.Sprintf("rescued_%d", i)
+		tc.Type = "function"
+		tc.Function.Name = r.Name
+		tc.Function.Arguments = args
+		out = append(out, tc)
+	}
+	return out
 }
 
 // assistantContentIsEmpty reports whether the assistant message has no

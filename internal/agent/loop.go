@@ -348,17 +348,14 @@ func parseToolCalls(respBody []byte) ([]toolCall, map[string]any, error) {
 	return nil, msg, nil
 }
 
-// contentJSONBlockRE matches the first balanced JSON object or array in
-// the assistant content. We deliberately use a non-greedy regex against
-// the outer brackets and validate by attempting json.Unmarshal so a
-// malformed block falls through to the natural-language path instead of
-// crashing the loop.
-var contentJSONBlockRE = regexp.MustCompile(`(?s)(\[\s*\{.*\}\s*\]|\{[^{}]*"name"\s*:\s*"[^"]+"[^{}]*\})`)
-
 // extractToolCallsFromContent rescues tool calls that vLLM's
 // guided-decoding `tool_choice:"required"` path leaks into the
 // assistant's `content` instead of `tool_calls`. Returns an empty slice
 // when no recognisable call is present.
+//
+// We use json.Decoder to scan for the first balanced JSON value at or
+// after the first '[' or '{', rather than a regex, so nested objects
+// like {"arguments":{"city":"Paris"}} parse correctly.
 func extractToolCallsFromContent(msg map[string]any) []toolCall {
 	content, _ := msg["content"].(string)
 	content = strings.TrimSpace(content)
@@ -366,7 +363,7 @@ func extractToolCallsFromContent(msg map[string]any) []toolCall {
 		return nil
 	}
 	// Strip a leading ```json / ``` markdown fence (some models wrap
-	// the call) so the regex sees the bare JSON.
+	// the call) so the decoder sees the bare JSON.
 	if strings.HasPrefix(content, "```") {
 		if i := strings.Index(content, "\n"); i >= 0 {
 			content = content[i+1:]
@@ -374,20 +371,29 @@ func extractToolCallsFromContent(msg map[string]any) []toolCall {
 		content = strings.TrimSuffix(content, "```")
 		content = strings.TrimSpace(content)
 	}
-	m := contentJSONBlockRE.FindString(content)
-	if m == "" {
+	// Find first JSON-value start.
+	idx := strings.IndexAny(content, "[{")
+	if idx < 0 {
 		return nil
 	}
-	// Try array shape first, then single object.
 	type rawCall struct {
 		Name       string          `json:"name"`
 		Arguments  json.RawMessage `json:"arguments,omitempty"`
 		Parameters json.RawMessage `json:"parameters,omitempty"`
 	}
+	// json.Decoder consumes one well-formed value and stops; trailing
+	// junk in `content` is harmless.
+	dec := json.NewDecoder(strings.NewReader(content[idx:]))
 	var arr []rawCall
-	if err := json.Unmarshal([]byte(m), &arr); err != nil {
+	// Peek at the first non-space byte to choose array vs object.
+	switch content[idx] {
+	case '[':
+		if err := dec.Decode(&arr); err != nil {
+			return nil
+		}
+	case '{':
 		var one rawCall
-		if err := json.Unmarshal([]byte(m), &one); err != nil {
+		if err := dec.Decode(&one); err != nil {
 			return nil
 		}
 		arr = []rawCall{one}

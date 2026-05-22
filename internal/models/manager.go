@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -240,23 +241,52 @@ func (m *Manager) Load(req LoadRequest) error {
 }
 
 // Unload stops vLLM and frees resources.
+//
+// Deadlock guard: we grab the cmd/cancel handles under the lock, then
+// release the lock BEFORE killing + waiting. Holding m.mu across
+// cmd.Wait() was the root cause of the "manager hangs on unload" bug —
+// every other handler (Status, Load, etc.) blocks on RLock/Lock while
+// Wait is waiting for vLLM's grandchildren to release the stderr pipe,
+// which can take indefinitely if any worker process becomes a zombie
+// reparented to PID 1.
+//
+// The kill also targets the whole process group (negative PID) so vLLM
+// worker subprocesses (EngineCore, ray, mp spawn) die together; combined
+// with cmd.WaitDelay (set in doLoad) this guarantees Wait returns even
+// if a grandchild keeps holding the pipe.
 func (m *Manager) Unload() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.state == StateIdle {
+		m.mu.Unlock()
 		return nil
 	}
+	cancel := m.cancel
+	cmd := m.cmd
+	m.cancel = nil
+	m.mu.Unlock()
 
-	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-		_ = m.cmd.Wait()
+	if cmd != nil && cmd.Process != nil {
+		// Kill the entire process group; vLLM forks worker processes
+		// that inherit the stderr pipe. SIGTERM first, give them 2 s
+		// to flush, then SIGKILL.
+		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		if err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+			time.Sleep(2 * time.Second)
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			_ = cmd.Process.Kill()
+		}
+		// cmd.WaitDelay (set in doLoad) bounds this at 10 s even if a
+		// grandchild keeps the pipe open.
+		_ = cmd.Wait()
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.state = StateIdle
 	m.model = ""
 	m.modelDigest = ""
@@ -391,9 +421,19 @@ func (m *Manager) doLoad(req LoadRequest) {
 		}
 	}
 
+	// Use a short, stable served-model-name. If the caller passed an
+	// absolute filesystem path (e.g. "/models/qwen36-35b-a3b-fp8"),
+	// vLLM would otherwise advertise the full path as the model id,
+	// which doesn't match what UI clients send and produces a 404 from
+	// vLLM ("model X does not exist"). Strip to basename so the served
+	// name matches the directory name under modelsDir.
+	servedName := req.Model
+	if filepath.IsAbs(servedName) {
+		servedName = filepath.Base(servedName)
+	}
 	args := []string{
 		"serve", modelPath,
-		"--served-model-name", req.Model,
+		"--served-model-name", servedName,
 		"--seed", "0",
 		"--tensor-parallel-size", "1",
 		"--no-enable-chunked-prefill",
@@ -444,6 +484,16 @@ func (m *Manager) doLoad(req LoadRequest) {
 		// VLLM_USE_V1 intentionally NOT set: defaults to V1 in
 		// vLLM >= 0.19, which is what we want for throughput.
 	)
+	// Put vLLM + every worker it spawns in their own process group so
+	// Unload() can SIGKILL the whole tree at once via `kill -- -pgid`.
+	// Without this, vLLM EngineCore / ray workers survive Process.Kill
+	// on the main pid and keep the stderr pipe open, so cmd.Wait()
+	// blocks forever (the original "manager hangs on unload" bug).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Bound cmd.Wait() at 10 s after the process exits even if a
+	// grandchild still holds an inherited pipe fd. Go's exec package
+	// forcibly closes the pipes once WaitDelay elapses.
+	cmd.WaitDelay = 10 * time.Second
 
 	// Pipe stderr for progress tracking.
 	stderr, err := cmd.StderrPipe()

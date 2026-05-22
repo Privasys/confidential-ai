@@ -104,12 +104,17 @@
           "max_model_len": {
             "type": "string",
             "description": "Maximum model context length",
-            "default": "65536"
+            "default": "262144"
+          },
+          "max_num_seqs": {
+            "type": "string",
+            "description": "vLLM --max-num-seqs cap. Lower this for very long contexts so KV cache fits (e.g. 4 for 256k on H100 80GB).",
+            "default": "4"
           },
           "gpu_memory_utilization": {
             "type": "string",
             "description": "GPU memory utilization (0.0-1.0)",
-            "default": "0.90"
+            "default": "0.93"
           }
         },
         "required": ["model"]

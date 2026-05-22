@@ -33,10 +33,10 @@ Every inference response includes:
     "seed": 0,
     "temperature": 0.7,
     "top_p": 0.95,
-    "model": "google/gemma-4-31b-it",
-    "quantization": "",
-    "vllm_version": "0.19.1",
-    "cuda_version": "13.0",
+    "model": "Qwen/Qwen3.6-35B-A3B-FP8",
+    "quantization": "fp8",
+    "vllm_version": "0.21.0",
+    "cuda_version": "12.6.3",
     "gpu": "H100-80GB",
     "tensor_parallel_size": 1,
     "batch_invariance": true,
@@ -59,7 +59,7 @@ go build -o confidential-ai ./cmd/server/
 ./confidential-ai \
   --listen :8080 \
   --vllm-upstream http://localhost:8000 \
-  --model google/gemma-4-31b-it \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 \
   --gpu-type H100-80GB \
   --tee-type tdx \
   --image-digest sha256:abc123
@@ -70,7 +70,7 @@ go build -o confidential-ai ./cmd/server/
 ```bash
 docker build -f Dockerfile.prod -t confidential-ai .
 docker run --gpus all -p 8080:8080 -p 8000:8000 \
-  -e MODEL_NAME=google/gemma-4-31b-it \
+  -e MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
   -e HF_TOKEN=<your-token> \
   -v model-cache:/root/.cache/huggingface \
   confidential-ai
@@ -87,6 +87,7 @@ reads this label at container start and bind-mounts the disk into the container.
 
 | Image | Model | Parameters | Precision | Disk |
 |-------|-------|-----------|-----------|------|
+| `confidential-ai-qwen36` | Qwen/Qwen3.6-35B-A3B-FP8 | 35B (MoE, ~3B active) | FP8 | model-qwen36-35b-a3b-fp8 (70 GB) |
 | `confidential-ai-gemma4` | google/gemma-4-31b-it | 30.7B (dense) | BF16 | model-gemma4-31b (70 GB) |
 | `confidential-ai-qwen25` | Qwen/Qwen2.5-32B-Instruct | 32.5B (dense) | BF16 | model-qwen25-32b (75 GB) |
 | `confidential-ai-mistral-small` | mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | BF16 | model-mistral-small-24b (55 GB) |

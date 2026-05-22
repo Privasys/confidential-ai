@@ -8,10 +8,10 @@ configured for reproducible inference inside TDX Confidential VMs.
 
 | Model | Parameters | Precision | VRAM | Best Use Case |
 |-------|-----------|-----------|------|---------------|
+| Qwen/Qwen3.6-35B-A3B-FP8 | 35B (MoE, ~3B active) | FP8 | ~60 GB | Default — coding, agentic, tool use |
 | google/gemma-4-31b-it | 30.7B (dense) | BF16 | ~62 GB | General reasoning, multimodal |
-| mistralai/Mistral-Small-4 | ~30B | FP8 | ~35 GB | High-throughput production |
-| Qwen/Qwen3.6-Plus-32B | 32B | BF16 | ~64 GB | Coding and agentic workflows |
-| meta-llama/Llama-4-Scout-109B | 109B MoE (17B active) | INT4 | ~58 GB | Complex logic, long context |
+| mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | BF16 | ~48 GB | High-throughput production |
+| meta-llama/Llama-4-Scout-17B-16E-Instruct | 109B MoE (17B active) | BF16 + INT4 | ~58 GB | Complex logic, long context |
 
 Note: CC mode reduces usable VRAM to ~78.7 GiB (firmware overhead). BF16 and FP8
 are preferred for CC because higher-precision weights are simpler to attest and verify.
@@ -22,7 +22,7 @@ Use `Dockerfile.prod` with `MODEL_NAME` env var for any HuggingFace model:
 
 ```bash
 docker run --gpus all -p 8000:8000 -p 8080:8080 \
-  -e MODEL_NAME=google/gemma-4-31b-it \
+  -e MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
   -e HF_TOKEN=<token> \
   -v model-cache:/root/.cache/huggingface \
   ghcr.io/privasys/confidential-ai:latest
@@ -45,6 +45,11 @@ entry. The Enclave OS Virtual manager reads this label at container start and
 bind-mounts the disk read-only at `/models`.
 
 ## Build
+
+```bash
+docker build -t ghcr.io/privasys/confidential-ai-qwen36:latest models/qwen3.6-35b-a3b-fp8/
+docker push ghcr.io/privasys/confidential-ai-qwen36:latest
+```
 
 ```bash
 docker build -t ghcr.io/privasys/confidential-ai-gemma4:latest models/gemma-4-31b-it/
@@ -79,11 +84,11 @@ is set by the loader via vLLM's `--served-model-name` and **must equal**:
   rewrites `model`; see `internal/handler/handler.go` →
   `proxyWithReproducibility`).
 
-The current convention is a short slug, e.g. `gemma4-31b`, **not** a
-filesystem path like `/models/gemma4-31b`. A path-style id used to leak
+The current convention is a short slug, e.g. `qwen36-35b-a3b-fp8`, **not** a
+filesystem path like `/models/qwen36-35b-a3b-fp8`. A path-style id used to leak
 through when the public fleet was hand-seeded; the chat UI then sent
-`/models/gemma4-31b` while vLLM was serving `gemma4-31b`, producing a
-404 with "The model /models/gemma4-31b does not exist". Always pick a
+`/models/qwen36-35b-a3b-fp8` while vLLM was serving `qwen36-35b-a3b-fp8`, producing a
+404 with "The model /models/qwen36-35b-a3b-fp8 does not exist". Always pick a
 short slug here and re-use it everywhere.
 
 ### Loading a model
@@ -95,7 +100,7 @@ loading is a confidential-ai proxy operation:
 curl -X POST -H "Authorization: Bearer $LOAD_TOKEN" \
      -H 'Content-Type: application/json' \
      https://<enclave-host>/v1/models/load \
-     -d '{"model":"gemma4-31b"}'
+     -d '{"model":"qwen36-35b-a3b-fp8"}'
 ```
 
 The state machine (`internal/models/manager.go`) goes
@@ -117,13 +122,16 @@ it, ensure (a) the enclave manager has `MGMT_BASE_URL`, `ENCLAVE_TOKEN`
 and `ENCLAVE_ID` set so the runtime-status push runs, and (b) the model
 is loaded.
 
-## Reasoning & tool calling (Gemma 4)
+## Reasoning & tool calling
 
 `Dockerfile.prod` pins **vLLM v0.21.0** (release notes:
 [vllm-project/vllm v0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0)),
-which ships first-class Gemma 4 reasoning + tool-call parsers per the
-[official Gemma 4 thinking recipe](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html).
-The image also bakes the official chat template into
+which ships first-class reasoning and tool-call parsers for both Gemma 4
+and Qwen3.6.
+
+### Gemma 4
+
+The image bakes the official chat template into
 `/opt/vllm-templates/tool_chat_template_gemma4.jinja` so the manager can
 reference it by short name.
 
@@ -138,6 +146,21 @@ contains `gemma4`, `internal/models/manager.go::doLoad` auto-applies:
 --default-chat-template-kwargs {"enable_thinking": true}
 ```
 
+### Qwen3 / Qwen3.5 / Qwen3.6
+
+For models matching `qwen3`, `qwen35`, or `qwen36`, the manager auto-applies:
+
+```text
+--reasoning-parser qwen3
+--tool-call-parser hermes
+--enable-auto-tool-choice
+```
+
+Qwen3.6 uses the Hermes tool-call schema and the `qwen3` reasoning parser
+(which strips `<think>…</think>` blocks from the user-visible content).
+
+### Shared behaviour
+
 Callers can override any of the auto-applied flags via the new optional
 `LoadRequest` fields (`reasoning_parser`, `tool_call_parser`,
 `enable_auto_tool_choice`, `chat_template`, `enable_thinking`) — the
@@ -148,7 +171,7 @@ User-visible effect: the OpenAI-compatible streaming response carries
 **separately** from `delta.content`. The chat front-end re-wraps the
 reasoning channel in `<think>…</think>` sentinels so the existing
 `splitReasoning()` / `ThinkingBlock` UI keeps working unchanged. The
-system prompt no longer contains any "wrap your thoughts in `<think>`"
+system prompt no longer contains any "wrap your thoughts in `</think>`"
 nudges — that was a workaround for vLLM < 0.20 and has been removed.
 
 ### SSE framing through the sealed-session relay

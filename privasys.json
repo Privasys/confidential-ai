@@ -9,7 +9,7 @@
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model identifier (e.g. google/gemma-4-31b-it)"
+            "description": "Model identifier (e.g. Qwen/Qwen3.6-35B-A3B-FP8)"
           },
           "messages": {
             "type": "string",
@@ -43,7 +43,7 @@
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model identifier (e.g. google/gemma-4-31b-it)"
+            "description": "Model identifier (e.g. Qwen/Qwen3.6-35B-A3B-FP8)"
           },
           "prompt": {
             "type": "string",
@@ -83,14 +83,14 @@
     },
     {
       "name": "load_model",
-      "description": "Load a model into the confidential AI instance. The model can be a local directory name (e.g. gemma-4-31b-it) or a HuggingFace repo (e.g. google/gemma-4-31b-it). Returns 202 Accepted with loading status.",
+      "description": "Load a model into the confidential AI instance. The model can be a local directory name (e.g. qwen36-35b-a3b-fp8) or a HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8). Returns 202 Accepted with loading status.",
       "endpoint": "/v1/models/load",
       "inputSchema": {
         "type": "object",
         "properties": {
           "model": {
             "type": "string",
-            "description": "Model name: local directory (e.g. gemma-4-31b-it) or HuggingFace repo (e.g. google/gemma-4-31b-it)"
+            "description": "Model name: local directory (e.g. qwen36-35b-a3b-fp8) or HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8)"
           },
           "dtype": {
             "type": "string",

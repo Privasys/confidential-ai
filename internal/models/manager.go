@@ -403,17 +403,28 @@ func (m *Manager) doLoad(req LoadRequest) {
 	// block as plain `content`, the chat UI's splitReasoning() routes it
 	// to the Thought-process panel, and any reply where the model puts
 	// everything inside <think> (a common Qwen3 failure mode for short
-	// agentic prompts) renders as an empty assistant message. Tool calls
-	// also need `--tool-call-parser hermes` (Qwen3 reuses the Hermes
-	// tool-call schema) plus `--enable-auto-tool-choice`. The same
-	// override-wins-if-set policy as gemma4 above.
+	// agentic prompts) renders as an empty assistant message.
+	//
+	// Tool calls need `--tool-call-parser qwen3_coder` plus
+	// `--enable-auto-tool-choice`. NOTE: we previously used `hermes`
+	// here because Qwen3 historically reused the Hermes XML schema,
+	// but Qwen3.5/3.6 emit the newer `<function=...><parameter=...>`
+	// XML format (a.k.a. "qwen3_coder" / "xml") that Hermes does not
+	// recognise. With `hermes` selected the model's free-form
+	// `<function=…>` output is left in `content` and `tool_calls` is
+	// returned as `[]`, which silently breaks agentic clients (Zed
+	// stops after the first assistant message because no tool call
+	// ever materialises). The `qwen3_coder` parser ships in vLLM
+	// >=0.10 and is verified for `qwen36-35b-a3b-fp8`.
+	//
+	// Same override-wins-if-set policy as gemma4 above.
 	lname := strings.ToLower(req.Model)
 	if strings.Contains(lname, "qwen3") || strings.Contains(lname, "qwen36") || strings.Contains(lname, "qwen35") {
 		if req.ReasoningParser == "" {
 			req.ReasoningParser = "qwen3"
 		}
 		if req.ToolCallParser == "" {
-			req.ToolCallParser = "hermes"
+			req.ToolCallParser = "qwen3_coder"
 			req.EnableAutoToolChoice = true
 		}
 		if !req.EnableThinking {

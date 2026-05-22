@@ -477,16 +477,31 @@ func InjectTools(body []byte, tools []Tool) ([]byte, error) {
 	}
 	req["tools"] = existing
 	if _, ok := req["tool_choice"]; !ok {
-		// Force a tool call on the FIRST turn. Several open-weight
-		// fine-tunes (Qwen-3 thinking, Gemma) ignore the OpenAI `tools`
-		// array in `auto` mode and emit a free-form markdown answer
-		// instead of a structured tool_calls array. `required` flips
-		// vLLM into guided-decoding mode, which reliably produces a
-		// well-formed tool_calls payload regardless of the model's own
-		// fine-tune. agent.Run downgrades to `auto` after the first
-		// dispatch so the model can choose to stop calling tools and
-		// produce the final summary.
-		req["tool_choice"] = "required"
+		// Default to `auto` and rely on the system-prompt nudge below
+		// to push reluctant models toward calling tools.
+		//
+		// Earlier revisions set `tool_choice:"required"` here on the
+		// theory that several open-weight fine-tunes (Qwen-3 thinking,
+		// Gemma) ignore the OpenAI `tools` array in `auto` mode and
+		// emit a free-form markdown answer instead of structured
+		// `tool_calls`. In practice the opposite happens on vLLM 0.21
+		// with `--reasoning-parser qwen3 --tool-call-parser qwen3_coder`:
+		// `required` puts the model into guided-decoding mode that
+		// either (a) burns the entire completion budget inside the
+		// `reasoning` field writing Python-style `tool_name(arg=val)`
+		// pseudo-code and never emits the `<tool_call>` XML the parser
+		// expects, finishing with `finish_reason:"tool_calls"` but
+		// `tool_calls:[]`, or (b) leaks the call as a raw JSON literal
+		// into `delta.content`. `auto` mode lets the model emit proper
+		// `<tool_call>` XML the per-model parser converts to a clean
+		// structured `tool_calls` array. The Zed pass-through path was
+		// always using `auto` and worked fine; this aligns the
+		// server-side agent path with the same proven behaviour.
+		//
+		// The content-scan fallback in `parseToolCalls` still rescues
+		// any call that leaks into `content` (e.g. an explicit
+		// `tool_choice:"required"` from a future caller).
+		req["tool_choice"] = "auto"
 	}
 
 	// Nudge the model with a short system message describing the available

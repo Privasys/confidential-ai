@@ -161,7 +161,7 @@ func TestInjectTools(t *testing.T) {
 		t.Fatalf("tools: %+v", tarr)
 	}
 	tc, _ := got["tool_choice"].(string)
-	if tc != "required" {
+	if tc != "auto" {
 		t.Fatalf("tool_choice: %q", tc)
 	}
 	fn, _ := tarr[0].(map[string]any)["function"].(map[string]any)

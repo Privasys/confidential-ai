@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/privasys/confidential-ai/internal/agent"
+	"github.com/privasys/confidential-ai/internal/billing"
 	"github.com/privasys/confidential-ai/internal/config"
 	"github.com/privasys/confidential-ai/internal/models"
 	"github.com/privasys/confidential-ai/internal/reproducibility"
@@ -23,8 +25,8 @@ import (
 // Handler is the HTTP handler that proxies to vLLM and injects
 // reproducibility metadata into every response.
 type Handler struct {
-	cfg    *config.Config
-	client *http.Client
+	cfg      *config.Config
+	client   *http.Client
 	modelMgr *models.Manager
 
 	// agentCatalog + agentDispatcher are non-nil when MCPServers is set
@@ -33,6 +35,10 @@ type Handler struct {
 	agentCatalog    *agent.Catalog
 	agentDispatcher *agent.Dispatcher
 	agentConsent    *agent.ConsentRegistry
+
+	// billing meters completed inference and gates requests at zero
+	// balance (pricing-plan.md §6.3). nil when metering is not configured.
+	billing *billing.Reporter
 
 	// ready is set to 1 once the vLLM upstream health check succeeds.
 	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
@@ -69,7 +75,26 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 		h.agentConsent = agent.NewConsentRegistry()
 		log.Printf("[agent] enabled (static-servers=%d, puller=%v)", len(servers), cfg.ToolSpecURL != "")
 	}
+	modelSlug := cfg.BillingModel
+	if modelSlug == "" {
+		modelSlug = cfg.ModelName
+	}
+	h.billing = billing.New(billing.Config{
+		AccountID:   cfg.BillingAccountID,
+		ReportURL:   cfg.UsageReportURL,
+		ReportToken: cfg.UsageReportToken,
+		Model:       modelSlug,
+	})
+	if h.billing != nil {
+		log.Printf("[billing] inference metering enabled (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
+	}
 	return h
+}
+
+// StartBilling starts the background usage-reporting loop, if metering is
+// enabled. Safe to call when metering is disabled (no-op).
+func (h *Handler) StartBilling(ctx context.Context) {
+	h.billing.Start(ctx)
 }
 
 // AgentCatalog exposes the live agent catalogue so external goroutines
@@ -225,6 +250,12 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
 		return
 	}
+	// Balance gate (pricing-plan.md §6.3): refuse inference at zero balance
+	// on the tool-carrying path too, so it can't be used to bypass billing.
+	if h.billing.Frozen() {
+		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
+		return
+	}
 	h.requestsTotal.Add(1)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
@@ -271,6 +302,11 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 
 	if !reqParams.Stream {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+		if resp.StatusCode == http.StatusOK && h.billing != nil {
+			if id, in, out, ok := extractUsage(respBody); ok {
+				h.billing.Record(id, in, out)
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
@@ -328,6 +364,14 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Balance gate (pricing-plan.md §6.3): refuse inference once the
+	// account is out of credit. The freeze state is maintained by the
+	// billing reporter from the management-service's usage responses.
+	if h.billing.Frozen() {
+		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
+		return
+	}
+
 	h.requestsTotal.Add(1)
 
 	// Read the incoming request body
@@ -364,6 +408,21 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		h.requestsFailed.Add(1)
 		writeError(w, http.StatusInternalServerError, "failed to inject seed")
 		return
+	}
+
+	// Billing (pricing-plan.md §6.3): when metering is enabled, streaming
+	// responses carry no token usage unless we ask vLLM for it. Inject
+	// stream_options.include_usage so the upstream emits a final usage
+	// chunk; we record it and (unless the client opted in itself) strip it
+	// from the forwarded stream so the response shape is unchanged.
+	var meter *meterCtx
+	if h.billing != nil {
+		meter = &meterCtx{reporter: h.billing}
+		if reqParams.Stream {
+			clientHadUsage := false
+			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)
+			meter.suppressUsage = !clientHadUsage
+		}
 	}
 
 	// The `model` field is forwarded verbatim. The proxy never silently
@@ -422,10 +481,28 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
-		h.proxyStream(w, resp, meta, wantRepro)
+		h.proxyStream(w, resp, meta, wantRepro, meter)
 	} else {
-		h.proxyNonStream(w, resp, meta, wantRepro)
+		h.proxyNonStream(w, resp, meta, wantRepro, meter)
 	}
+}
+
+// meterCtx carries per-request billing state into the proxy response path.
+// nil when inference metering is disabled.
+type meterCtx struct {
+	reporter *billing.Reporter
+	// suppressUsage strips the synthetic stream usage chunk we injected via
+	// stream_options.include_usage so a client that did not opt in still sees
+	// an unchanged stream.
+	suppressUsage bool
+}
+
+// record forwards extracted token counts to the reporter. Safe on nil.
+func (m *meterCtx) record(requestID string, in, out int64) {
+	if m == nil {
+		return
+	}
+	m.reporter.Record(requestID, in, out)
 }
 
 // wantsReproducibility reports whether the caller opted in to the
@@ -440,7 +517,7 @@ func wantsReproducibility(r *http.Request) bool {
 }
 
 // proxyNonStream handles non-streaming responses: read full body, inject metadata.
-func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool) {
+func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MiB limit
 	if err != nil {
 		h.requestsFailed.Add(1)
@@ -454,6 +531,12 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 		return
+	}
+
+	// Meter token usage from the upstream body (present in every successful
+	// vLLM completion, regardless of the reproducibility opt-in).
+	if id, in, out, ok := extractUsage(respBody); ok {
+		meter.record(id, in, out)
 	}
 
 	if !wantRepro {
@@ -504,7 +587,7 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 // We also short-circuit `data: [DONE]` so the metadata event is
 // emitted *before* the sentinel even when vLLM packs both lines into
 // one TCP read.
-func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool) {
+func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx) {
 	if resp.StatusCode != http.StatusOK {
 		// Error responses are not streamed; read and pass through.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -550,6 +633,19 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 			// "\n\n". We compare on raw bytes so CRLF separators (rare
 			// in practice; vLLM emits LF) still work.
 			if bytes.HasSuffix(event, []byte("\n\n")) || bytes.Equal(event, []byte("\n")) {
+				// Billing: vLLM's final include_usage chunk carries the
+				// token totals with an empty choices array. Record it and,
+				// unless the client opted in to include_usage itself, drop
+				// it from the forwarded stream so the response is unchanged.
+				if meter != nil {
+					if id, in, out, ok := extractStreamUsage(event); ok {
+						meter.record(id, in, out)
+						if meter.suppressUsage {
+							event = event[:0]
+							continue
+						}
+					}
+				}
 				if isDoneEvent(event) {
 					emitMeta()
 					_, _ = w.Write(event)
@@ -821,6 +917,79 @@ func injectSeed(body []byte, seed int64) ([]byte, error) {
 		m["seed"] = seed
 	}
 	return json.Marshal(m)
+}
+
+// usageEnvelope is the minimal shape parsed off a vLLM completion (streaming
+// or non-streaming) to extract billable token counts for metering.
+type usageEnvelope struct {
+	ID    string `json:"id"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// extractUsage parses the token counts from a non-streaming vLLM completion
+// body. ok is false when the body has no usage block (e.g. an error response).
+func extractUsage(body []byte) (id string, in, out int64, ok bool) {
+	var e usageEnvelope
+	if err := json.Unmarshal(body, &e); err != nil || e.Usage == nil {
+		return "", 0, 0, false
+	}
+	return e.ID, e.Usage.PromptTokens, e.Usage.CompletionTokens, true
+}
+
+// extractStreamUsage parses the token counts from a single SSE event. vLLM
+// emits the usage totals (with an empty choices array) as the final chunk when
+// stream_options.include_usage is set. Returns ok=false for ordinary delta
+// chunks, the [DONE] sentinel, and the injected reproducibility frame.
+func extractStreamUsage(event []byte) (id string, in, out int64, ok bool) {
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		var e usageEnvelope
+		if err := json.Unmarshal(data, &e); err != nil || e.Usage == nil {
+			continue
+		}
+		// A usage-bearing chunk: prompt_tokens is only populated on the
+		// final include_usage frame, not on per-token deltas.
+		if e.Usage.PromptTokens > 0 || e.Usage.CompletionTokens > 0 {
+			return e.ID, e.Usage.PromptTokens, e.Usage.CompletionTokens, true
+		}
+	}
+	return "", 0, 0, false
+}
+
+// injectStreamUsage sets stream_options.include_usage=true so vLLM appends a
+// final usage chunk we can meter. It returns the modified body and whether the
+// client had already requested include_usage (in which case the usage chunk
+// must NOT be stripped from the forwarded stream). On parse failure the body is
+// returned unchanged.
+func injectStreamUsage(body []byte) ([]byte, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	clientHadUsage := false
+	opts, _ := m["stream_options"].(map[string]any)
+	if opts == nil {
+		opts = map[string]any{}
+	} else if v, ok := opts["include_usage"].(bool); ok && v {
+		clientHadUsage = true
+	}
+	opts["include_usage"] = true
+	m["stream_options"] = opts
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, clientHadUsage
+	}
+	return out, clientHadUsage
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

@@ -52,6 +52,11 @@ func main() {
 	// nil (no MCP_SERVERS and no --tool-spec-url).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Billing: start the background inference-metering loop (no-op when
+	// metering is not configured).
+	h.StartBilling(ctx)
+
 	if cfg.ToolSpecURL != "" {
 		if cat := h.AgentCatalog(); cat != nil {
 			s := specsync.New(cfg.ToolSpecURL, cfg.ToolSpecToken, cfg.ToolSpecInterval, nil, cat)

@@ -83,6 +83,40 @@ type Config struct {
 	// Privasys chat front-ends. Empty disables CORS entirely (browser
 	// requests from any origin will be blocked by the SOP).
 	CORSOrigins string
+
+	// --- Billing (pricing-plan.md §6.3) ---
+	//
+	// The proxy meters every completed inference by the vLLM-reported
+	// prompt/completion token counts and pushes them, per request, to
+	// the management-service AI-usage endpoint (UsageReportURL). That
+	// service — not this enclave — holds the credit-ledger credential
+	// and performs the priced debit, then returns the account's freeze
+	// state so the proxy can refuse inference at zero balance. The
+	// enclave is deliberately given a usage-only machine credential
+	// (UsageReportToken), never the ledger's grant-capable token.
+	//
+	// All four fields are injected by the orchestrator at deploy time.
+	// When UsageReportURL or BillingAccountID is empty, metering and the
+	// balance gate are disabled and the proxy serves unmetered.
+
+	// BillingAccountID is the deployment-owner account charged for
+	// inference (per-caller attribution is a later phase). env:
+	// BILLING_ACCOUNT_ID.
+	BillingAccountID string
+
+	// UsageReportURL is the management-service endpoint the proxy POSTs
+	// token usage to (e.g. https://manager.internal/api/v1/enclave/ai-usage).
+	// env: USAGE_REPORT_URL.
+	UsageReportURL string
+
+	// UsageReportToken is the EnclaveToken bearer presented to
+	// UsageReportURL. env: USAGE_REPORT_TOKEN.
+	UsageReportToken string
+
+	// BillingModel overrides the model slug reported to the usage
+	// endpoint for price-book lookup. Defaults to ModelName / the
+	// dynamically loaded model name when empty. env: BILLING_MODEL.
+	BillingModel string
 }
 
 // Parse reads configuration from flags and environment, returning it.
@@ -131,6 +165,15 @@ func Parse(args []string) (*Config, error) {
 		"How often to poll tool-spec-url (env: TOOL_SPEC_INTERVAL, e.g. 30s)")
 	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat-test.privasys.org,http://localhost:4210,http://localhost:3000"),
 		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
+
+	fs.StringVar(&cfg.BillingAccountID, "billing-account-id", envOr("BILLING_ACCOUNT_ID", ""),
+		"Deployment-owner account charged for inference; empty disables metering (env: BILLING_ACCOUNT_ID)")
+	fs.StringVar(&cfg.UsageReportURL, "usage-report-url", envOr("USAGE_REPORT_URL", ""),
+		"management-service AI-usage endpoint the proxy reports token usage to; empty disables metering (env: USAGE_REPORT_URL)")
+	fs.StringVar(&cfg.UsageReportToken, "usage-report-token", envOr("USAGE_REPORT_TOKEN", ""),
+		"EnclaveToken bearer presented to usage-report-url (env: USAGE_REPORT_TOKEN)")
+	fs.StringVar(&cfg.BillingModel, "billing-model", envOr("BILLING_MODEL", ""),
+		"Model slug reported for price-book lookup; defaults to the served model name (env: BILLING_MODEL)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

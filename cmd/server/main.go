@@ -54,8 +54,11 @@ func main() {
 	defer stop()
 
 	// Billing: start the background inference-metering loop (no-op when
-	// metering is not configured).
+	// metering is not configured), then restore any billing config
+	// persisted on the encrypted volume by a previous POST /configure so
+	// metering survives a restart.
 	h.StartBilling(ctx)
+	h.RestorePersistedBilling()
 
 	if cfg.ToolSpecURL != "" {
 		if cat := h.AgentCatalog(); cat != nil {

@@ -95,9 +95,13 @@ type Config struct {
 	// enclave is deliberately given a usage-only machine credential
 	// (UsageReportToken), never the ledger's grant-capable token.
 	//
-	// All four fields are injected by the orchestrator at deploy time.
-	// When UsageReportURL or BillingAccountID is empty, metering and the
-	// balance gate are disabled and the proxy serves unmetered.
+	// All four fields may be supplied by env/flags, but container apps
+	// receive them at runtime via POST /configure (the configure-then-
+	// freeze pattern — the container load envelope carries no env vars).
+	// The delivered config is persisted to BillingConfigFile and reloaded
+	// on restart. When UsageReportURL or BillingAccountID is empty,
+	// metering and the balance gate are disabled and the proxy serves
+	// unmetered.
 
 	// BillingAccountID is the deployment-owner account charged for
 	// inference (per-caller attribution is a later phase). env:
@@ -117,6 +121,15 @@ type Config struct {
 	// endpoint for price-book lookup. Defaults to ModelName / the
 	// dynamically loaded model name when empty. env: BILLING_MODEL.
 	BillingModel string
+
+	// BillingConfigFile is the path on the per-container encrypted volume
+	// where billing configuration delivered via POST /configure is
+	// persisted. On container start the proxy reloads this file so
+	// metering survives a restart (the manager re-freezes after every
+	// restart and the orchestrator re-delivers via /configure, but the
+	// persisted copy lets the proxy restore billing without waiting).
+	// Empty disables persistence. env: BILLING_CONFIG_FILE.
+	BillingConfigFile string
 }
 
 // Parse reads configuration from flags and environment, returning it.
@@ -174,6 +187,8 @@ func Parse(args []string) (*Config, error) {
 		"EnclaveToken bearer presented to usage-report-url (env: USAGE_REPORT_TOKEN)")
 	fs.StringVar(&cfg.BillingModel, "billing-model", envOr("BILLING_MODEL", ""),
 		"Model slug reported for price-book lookup; defaults to the served model name (env: BILLING_MODEL)")
+	fs.StringVar(&cfg.BillingConfigFile, "billing-config-file", envOr("BILLING_CONFIG_FILE", "/data/billing-config.json"),
+		"Path where billing config from POST /configure is persisted and reloaded on restart; empty disables (env: BILLING_CONFIG_FILE)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

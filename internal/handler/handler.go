@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,8 +38,21 @@ type Handler struct {
 	agentConsent    *agent.ConsentRegistry
 
 	// billing meters completed inference and gates requests at zero
-	// balance (pricing-plan.md §6.3). nil when metering is not configured.
-	billing *billing.Reporter
+	// balance (pricing-plan.md §6.3). Held behind an atomic pointer
+	// because POST /configure can swap the live Reporter at runtime
+	// (env vars are not deliverable to container apps; billing config
+	// arrives via the configure-then-freeze pattern). nil/Load()==nil
+	// means metering is not configured. All Reporter methods are
+	// nil-safe.
+	billing atomic.Pointer[billing.Reporter]
+	// billingMu serializes Reconfigure/Start so the stop-old/start-new
+	// swap is atomic with respect to itself.
+	billingMu sync.Mutex
+	// billingBaseCtx is the server lifetime context the reporter loops
+	// derive from; set by StartBilling. billingStop cancels the loop of
+	// the currently-installed Reporter.
+	billingBaseCtx context.Context
+	billingStop    context.CancelFunc
 
 	// ready is set to 1 once the vLLM upstream health check succeeds.
 	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
@@ -79,23 +93,62 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	if modelSlug == "" {
 		modelSlug = cfg.ModelName
 	}
-	h.billing = billing.New(billing.Config{
+	if rep := billing.New(billing.Config{
 		AccountID:   cfg.BillingAccountID,
 		ReportURL:   cfg.UsageReportURL,
 		ReportToken: cfg.UsageReportToken,
 		Model:       modelSlug,
-	})
-	if h.billing != nil {
-		log.Printf("[billing] inference metering enabled (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
+	}); rep != nil {
+		h.billing.Store(rep)
+		log.Printf("[billing] inference metering enabled from env (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
 	}
 	return h
 }
 
 // StartBilling starts the background usage-reporting loop, if metering is
-// enabled. Safe to call when metering is disabled (no-op).
+// enabled. It records the server lifetime context so that a later
+// ReconfigureBilling (via POST /configure) can start the swapped-in
+// Reporter. Safe to call when metering is disabled (no-op loop).
 func (h *Handler) StartBilling(ctx context.Context) {
-	h.billing.Start(ctx)
+	h.billingMu.Lock()
+	defer h.billingMu.Unlock()
+	h.billingBaseCtx = ctx
+	if rep := h.billing.Load(); rep != nil {
+		loopCtx, cancel := context.WithCancel(ctx)
+		rep.Start(loopCtx)
+		h.billingStop = cancel
+	}
 }
+
+// ReconfigureBilling atomically swaps the live billing Reporter to one
+// built from cfg (or disables metering when cfg is disabled). The
+// previous Reporter's loop is cancelled and the new one is started under
+// the server lifetime context recorded by StartBilling. Safe for
+// concurrent callers; the hot path reads h.billing.Load() lock-free.
+func (h *Handler) ReconfigureBilling(cfg billing.Config) {
+	h.billingMu.Lock()
+	defer h.billingMu.Unlock()
+	if h.billingStop != nil {
+		h.billingStop()
+		h.billingStop = nil
+	}
+	rep := billing.New(cfg)
+	if rep != nil && h.billingBaseCtx != nil {
+		loopCtx, cancel := context.WithCancel(h.billingBaseCtx)
+		rep.Start(loopCtx)
+		h.billingStop = cancel
+	}
+	h.billing.Store(rep)
+	if rep != nil {
+		log.Printf("[billing] inference metering (re)configured (account=%s, model=%s)", cfg.AccountID, cfg.Model)
+	} else {
+		log.Printf("[billing] inference metering disabled by configure")
+	}
+}
+
+// billingReporter returns the currently-installed Reporter (possibly nil).
+// All Reporter methods are nil-safe, so callers can chain directly.
+func (h *Handler) billingReporter() *billing.Reporter { return h.billing.Load() }
 
 // AgentCatalog exposes the live agent catalogue so external goroutines
 // (e.g. the tool-spec puller in cmd/server) can mutate it via
@@ -146,6 +199,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /metrics", h.metrics)
 	mux.HandleFunc("POST /v1/agent/confirm/{id}", h.agentConfirm)
+	mux.HandleFunc("POST /configure", h.configure)
 }
 
 // requireLoadToken gates a handler behind the static load token defined in
@@ -252,7 +306,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 	}
 	// Balance gate (pricing-plan.md §6.3): refuse inference at zero balance
 	// on the tool-carrying path too, so it can't be used to bypass billing.
-	if h.billing.Frozen() {
+	if h.billingReporter().Frozen() {
 		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
 		return
 	}
@@ -302,9 +356,9 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 
 	if !reqParams.Stream {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
-		if resp.StatusCode == http.StatusOK && h.billing != nil {
+		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
 			if id, in, out, ok := extractUsage(respBody); ok {
-				h.billing.Record(id, in, out)
+				rep.Record(id, in, out)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -367,7 +421,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// Balance gate (pricing-plan.md §6.3): refuse inference once the
 	// account is out of credit. The freeze state is maintained by the
 	// billing reporter from the management-service's usage responses.
-	if h.billing.Frozen() {
+	if h.billingReporter().Frozen() {
 		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
 		return
 	}
@@ -416,8 +470,8 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// chunk; we record it and (unless the client opted in itself) strip it
 	// from the forwarded stream so the response shape is unchanged.
 	var meter *meterCtx
-	if h.billing != nil {
-		meter = &meterCtx{reporter: h.billing}
+	if rep := h.billingReporter(); rep != nil {
+		meter = &meterCtx{reporter: rep}
 		if reqParams.Stream {
 			clientHadUsage := false
 			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)

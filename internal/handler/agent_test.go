@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -157,3 +158,70 @@ func TestAgenticChatCompletions(t *testing.T) {
 		t.Fatalf("missing [DONE] sentinel")
 	}
 }
+
+// TestCallVLLMStreamMetersUsage verifies the agentic streaming synthesis
+// (1) embeds the include_usage token totals into the synthesised non-stream
+// body so the invoke wrapper can extractUsage(...) + Record(...) it, and
+// (2) never forwards the usage-only chunk to the client sink, keeping the
+// relayed stream byte-shape unchanged. This guards the billing-bypass fix:
+// before it, the default agentic chat path served inference unmetered.
+func TestCallVLLMStreamMetersUsage(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ignore the background readiness poller's /health probes.
+		if r.URL.Path == "/health" {
+			return
+		}
+		// Caller is expected to have injected include_usage.
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		opts, _ := req["stream_options"].(map[string]any)
+		if opts == nil || opts["include_usage"] != true {
+			t.Errorf("expected stream_options.include_usage=true, got %v", req["stream_options"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		writeChunk := func(payload string) {
+			w.Write([]byte("data: " + payload + "\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		// A content chunk, then the final include_usage chunk (empty
+		// choices), then the terminator.
+		writeChunk(`{"id":"u1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
+		writeChunk(`{"id":"u1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}`)
+		writeChunk("[DONE]")
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{ModelName: "m", VLLMUpstream: vllm.URL, TeeType: "tdx"}, nil)
+
+	// Inject include_usage exactly as the agentic invoke wrapper does.
+	body, _ := injectStreamUsage([]byte(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+
+	var forwarded strings.Builder
+	out, err := h.callVLLMStream(context.Background(), body, func(chunk []byte) {
+		forwarded.Write(chunk)
+	})
+	if err != nil {
+		t.Fatalf("callVLLMStream: %v", err)
+	}
+
+	// (1) Synthesised body must carry the usage totals.
+	id, in, o, ok := extractUsage(out)
+	if !ok {
+		t.Fatalf("extractUsage found no usage in synthesised body: %s", out)
+	}
+	if id != "u1" || in != 11 || o != 7 {
+		t.Fatalf("extractUsage = (%q,%d,%d), want (u1,11,7)", id, in, o)
+	}
+
+	// (2) The usage-only chunk must NOT be forwarded to the client.
+	if strings.Contains(forwarded.String(), `"usage"`) {
+		t.Fatalf("usage-only chunk leaked into relayed stream: %s", forwarded.String())
+	}
+	if !strings.Contains(forwarded.String(), "hello") {
+		t.Fatalf("content chunk missing from relayed stream: %s", forwarded.String())
+	}
+}
+

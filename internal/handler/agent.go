@@ -111,6 +111,14 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		flusher.Flush()
 	}
 
+	// Billing (pricing-plan.md §6.3): the agentic path makes one or more
+	// upstream vLLM calls per request (one per tool-loop turn). Each call's
+	// token usage must be metered, exactly like the plain proxy paths. We
+	// record usage from every upstream response body — both the synthesised
+	// stream body (which embeds the include_usage totals) and the native
+	// non-stream body carry a `usage` block. nil reporter ⇒ metering off.
+	rep := h.billingReporter()
+
 	// Pick the upstream invoker based on whether the client wants a
 	// stream. Both implementations return a non-stream-shaped response
 	// body so agent.Run can inspect tool_calls between iterations.
@@ -127,12 +135,25 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			if err != nil {
 				return nil, err
 			}
-			return h.callVLLMStream(ctx, b, func(chunk []byte) {
+			// Ask vLLM for the final usage chunk so the synthesised body
+			// carries token totals to meter. The usage-only chunk is
+			// captured by callVLLMStream and never forwarded to the
+			// client, so the relayed stream is unchanged.
+			if rep != nil {
+				b, _ = injectStreamUsage(b)
+			}
+			out, err := h.callVLLMStream(ctx, b, func(chunk []byte) {
 				writeMu.Lock()
 				defer writeMu.Unlock()
 				w.Write(chunk)
 				flusher.Flush()
 			})
+			if err == nil && rep != nil {
+				if id, in, o, ok := extractUsage(out); ok {
+					rep.Record(id, in, o)
+				}
+			}
+			return out, err
 		}
 	} else {
 		// Non-stream path: vLLM rejects `stream_options` whenever
@@ -142,7 +163,13 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			if err != nil {
 				return nil, err
 			}
-			return h.callVLLM(ctx, b)
+			out, err := h.callVLLM(ctx, b)
+			if err == nil && rep != nil {
+				if id, in, o, ok := extractUsage(out); ok {
+					rep.Record(id, in, o)
+				}
+			}
+			return out, err
 		}
 	}
 
@@ -311,6 +338,9 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 		createdNum   int64
 		modelStr     string
 		toolCalls    = map[int]*tcAccum{}
+		promptTokens     int64
+		completionTokens int64
+		usageSeen        bool
 	)
 
 	// SSE lines can be long (a tool_call argument fragment may be a few
@@ -355,6 +385,10 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(payload, &chunk); err != nil {
 			// Unparseable — best effort: forward as-is so we don't
@@ -373,6 +407,20 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 		}
 		if modelStr == "" {
 			modelStr = chunk.Model
+		}
+
+		// Billing: capture the include_usage totals (the final chunk
+		// carries `usage` with an empty `choices` array). Record them
+		// onto the synthesised body and never forward this usage-only
+		// chunk to the client so the relayed stream stays unchanged.
+		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+			promptTokens = chunk.Usage.PromptTokens
+			completionTokens = chunk.Usage.CompletionTokens
+			usageSeen = true
+		}
+		if len(chunk.Choices) == 0 {
+			// A usage-only / heartbeat chunk has nothing to forward.
+			continue
 		}
 
 		hasContent := false
@@ -465,6 +513,17 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 			"message":       msg,
 			"finish_reason": finishReason,
 		}},
+	}
+	// Surface the metered token totals so the agentic invoke wrapper can
+	// extractUsage(...) from this synthesised body, matching the native
+	// non-stream path. Absent when the client did not enable include_usage
+	// and metering was off (no usage chunk requested).
+	if usageSeen {
+		full["usage"] = map[string]any{
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      promptTokens + completionTokens,
+		}
 	}
 	return json.Marshal(full)
 }

@@ -27,7 +27,7 @@ import (
 // populated. When stream=true, every tool round trip is reported live.
 func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request) {
 	if !h.IsReady() {
-		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
 	h.requestsTotal.Add(1)

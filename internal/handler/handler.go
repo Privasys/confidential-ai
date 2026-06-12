@@ -182,6 +182,23 @@ func (h *Handler) IsReady() bool {
 	return h.ready.Load() == 1
 }
 
+// NotReadyMessage describes WHY inference is unavailable. The historic
+// catch-all "Model is loading" was actively misleading when the
+// manager was idle (no load ever requested) or a load had failed.
+func (h *Handler) NotReadyMessage() string {
+	if h.modelMgr == nil {
+		return "Model is loading, please wait..."
+	}
+	switch s := h.modelMgr.Status(); s.State {
+	case models.StateLoading:
+		return "Model is loading, please wait..."
+	case models.StateFailed:
+		return "Model load failed: " + s.Error + ". Retry via POST /v1/models/load."
+	default:
+		return "No model loaded. Load one via POST /v1/models/load."
+	}
+}
+
 // RegisterRoutes adds all endpoints to the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.chatCompletions)
@@ -301,7 +318,7 @@ func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 // frame that is not a `chat.completion.chunk`.
 func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string) {
 	if !h.IsReady() {
-		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
 	// Balance gate (pricing-plan.md §6.3): refuse inference at zero balance
@@ -403,7 +420,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 // models proxies the /v1/models endpoint directly.
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if !h.IsReady() {
-		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
 	h.proxyDirect(w, r, "/v1/models")
@@ -414,7 +431,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // Supports both streaming (SSE) and non-streaming responses.
 func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string) {
 	if !h.IsReady() {
-		writeError(w, http.StatusServiceUnavailable, "Model is loading, please wait...")
+		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
 

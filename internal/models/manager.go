@@ -225,6 +225,14 @@ func (m *Manager) Load(req LoadRequest) error {
 	if req.GPUMemoryUtilization == 0 {
 		req.GPUMemoryUtilization = 0.90
 	}
+	if req.MaxNumSeqs == 0 {
+		// vLLM's own default (1024) is sized for serving clusters and
+		// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
+		// block per decode sequence) fail at KV-cache init on a single
+		// H100. 32 matches the concurrency this deployment is priced
+		// for and stays far below the Mamba block budget.
+		req.MaxNumSeqs = 32
+	}
 
 	m.state = StateLoading
 	m.model = req.Model

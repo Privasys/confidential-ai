@@ -35,7 +35,7 @@ Every inference response includes:
     "top_p": 0.95,
     "model": "Qwen/Qwen3.6-35B-A3B-FP8",
     "quantization": "fp8",
-    "vllm_version": "0.21.0",
+    "vllm_version": "0.22.1",
     "cuda_version": "12.6.3",
     "gpu": "H100-80GB",
     "tensor_parallel_size": 1,

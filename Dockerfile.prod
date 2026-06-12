@@ -24,15 +24,15 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/
 # (FlashInfer top-k/top-p sampler).
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
-# vLLM v0.21.0 — adds Qwen3.5/Qwen3.6 Gated DeltaNet support, Gemma4
-# MoE/tool-parser fixes, MTP for Gemma4, and FlashInfer top-k/top-p
-# sampler enabled by default. v0.20.0 first introduced Gemma 4
-# reasoning + tool-call parsers (`--reasoning-parser gemma4`,
-# `--tool-call-parser gemma4`).
-# Release: https://github.com/vllm-project/vllm/releases/tag/v0.21.0
-# Recipe:  https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html
+# vLLM v0.22.1 — adds `--performance-mode`, Qwen3-Next MTP speculative
+# decoding (`{"method":"qwen3_next_mtp"}`), configurable CUDA-graph
+# capture size, and expanded mamba-ssm-cache-dtype handling for hybrid
+# (Gated DeltaNet) models. v0.21.0 introduced Qwen3.5/3.6 GDN support;
+# v0.20.0 introduced the Gemma 4 reasoning + tool-call parsers.
+# Release: https://github.com/vllm-project/vllm/releases/tag/v0.22.1
+# Recipe:  https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3.5.html
 #
-# CUDA pinning: vLLM publishes two x86_64 GPU wheels for v0.21.0 on
+# CUDA pinning: vLLM publishes two x86_64 GPU wheels per release on
 # GitHub: the default (built against CUDA 13, references libcudart.so.13)
 # and an explicit `+cu129` wheel (built against CUDA 12.9, references
 # libcudart.so.12). Our base image ships the CUDA 12.6 runtime and we
@@ -40,10 +40,10 @@ FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 # from the GitHub release and pair it with the cu129 PyTorch backend
 # (binary-compatible with the cu126 base — torch ships its own bundled
 # libcudart.so.12).
-# Note: v0.21.0 wheels bumped their manylinux tag from `_2_31` (in
-# v0.20.1) to `_2_34`. Ubuntu 24.04 ships glibc 2.39, which satisfies it.
-# Installing plain `vllm==0.21.0` resolves to the CUDA 13 default
-# wheel and crashes at import with
+# Note: v0.22.x wheels moved their manylinux tag back from `_2_34`
+# (v0.21.0) to `_2_28`. Ubuntu 24.04 ships glibc 2.39, which satisfies
+# either. Installing plain `vllm==0.22.1` resolves to the CUDA 13
+# default wheel and crashes at import with
 # `ImportError: libcudart.so.13: cannot open shared object file`.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,7 +55,7 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu129 \
-      "https://github.com/vllm-project/vllm/releases/download/v0.21.0/vllm-0.21.0+cu129-cp38-abi3-manylinux_2_34_x86_64.whl"
+      "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_x86_64.whl"
 
 # Bake the official Gemma 4 chat template into the image so the
 # manager can reference it by short name (--chat-template gemma4
@@ -63,7 +63,7 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 # reproducibility.
 RUN mkdir -p /opt/vllm-templates && \
     curl -fsSL -o /opt/vllm-templates/tool_chat_template_gemma4.jinja \
-      https://raw.githubusercontent.com/vllm-project/vllm/v0.21.0/examples/tool_chat_template_gemma4.jinja
+      https://raw.githubusercontent.com/vllm-project/vllm/v0.22.1/examples/tool_chat_template_gemma4.jinja
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
@@ -77,15 +77,16 @@ LABEL ai.privasys.volume="/mnt:/models:ro"
 # Dynamic model loading mode: Go proxy starts immediately, vLLM on-demand.
 ENV MODELS_DIR=/models
 # Pin the version reported in reproducibility metadata to the wheel
-# actually installed above. Without this, entrypoint.sh and config.go
-# fall back to the legacy default ("0.19.1") and the per-response
-# `reproducibility.vllm_version` field is misleading. (The running
-# server is still correct — vLLM's system_fingerprint comes from the
-# wheel itself — but our attestation metadata must agree.)
-ENV VLLM_VERSION=0.21.0
+# actually installed above. entrypoint.sh and config.go carry the same
+# value as a fallback, but this env is the source of truth — the
+# per-response `reproducibility.vllm_version` field must agree with
+# the wheel. (The running server is always correct — vLLM's
+# system_fingerprint comes from the wheel itself — but our attestation
+# metadata must match it.)
+ENV VLLM_VERSION=0.22.1
 ENV CUDA_VERSION=12.6.3
 
-# Disable DeepGEMM FP8 JIT path. vLLM v0.21.0 ships bundled DeepGEMM
+# Disable DeepGEMM FP8 JIT path. vLLM v0.21.0+ ships bundled DeepGEMM
 # kernels that JIT-compile via nvcc at first inference for native FP8
 # models (e.g. Qwen3.6-35B-A3B-FP8) on Hopper. With the CUDA 12.6
 # devel toolkit baked in, the JIT compile aborts with:

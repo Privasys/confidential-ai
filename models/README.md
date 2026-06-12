@@ -124,10 +124,11 @@ is loaded.
 
 ## Reasoning & tool calling
 
-`Dockerfile.prod` pins **vLLM v0.21.0** (release notes:
-[vllm-project/vllm v0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0)),
+`Dockerfile.prod` pins **vLLM v0.22.1** (release notes:
+[vllm-project/vllm v0.22.1](https://github.com/vllm-project/vllm/releases/tag/v0.22.1)),
 which ships first-class reasoning and tool-call parsers for both Gemma 4
-and Qwen3.6.
+and Qwen3.6, plus Qwen3-Next MTP speculative decoding and
+`--performance-mode`.
 
 ### Gemma 4
 
@@ -152,12 +153,14 @@ For models matching `qwen3`, `qwen35`, or `qwen36`, the manager auto-applies:
 
 ```text
 --reasoning-parser qwen3
---tool-call-parser hermes
+--tool-call-parser qwen3_coder
 --enable-auto-tool-choice
 ```
 
-Qwen3.6 uses the Hermes tool-call schema and the `qwen3` reasoning parser
-(which strips `<think>…</think>` blocks from the user-visible content).
+Qwen3.5/3.6 emit the `<function=…><parameter=…>` XML tool-call format,
+which requires the `qwen3_coder` parser (the older `hermes` parser
+silently returns `tool_calls=[]` for it). The `qwen3` reasoning parser
+strips `<think>…</think>` blocks from the user-visible content.
 
 ### Shared behaviour
 
@@ -190,8 +193,9 @@ before `data: [DONE]`.
 
 ### Upgrade requirement
 
-vLLM v0.21.x requires `transformers>=5.5.0` (and formally deprecates
-v4 — migrate any pinned downstream code to v5). The dependency is pulled in
-transitively by the `uv pip install` in `Dockerfile.prod`. CUDA 12.6 is
-still supported via `--torch-backend=cu126`, so the base image
-(`nvidia/cuda:12.6.3-runtime-ubuntu24.04`) does not need to change.
+vLLM v0.21+ requires `transformers>=5.5.0` (v4 is formally deprecated —
+migrate any pinned downstream code to v5). The dependency is pulled in
+transitively by the `uv pip install` in `Dockerfile.prod`. CUDA 12.x is
+still supported via the `+cu129` release wheel paired with the cu129
+torch backend, so the base image (`nvidia/cuda:12.6.3-devel-ubuntu24.04`)
+does not need to change.

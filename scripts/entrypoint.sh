@@ -41,8 +41,8 @@ if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
     --load-token "${LOAD_TOKEN:-}" \
     --gpu-type "${GPU_TYPE:-H100-80GB}" \
     --tee-type "${TEE_TYPE:-tdx}" \
-    --cuda-version "${CUDA_VERSION:-13.0}" \
-    --vllm-version "${VLLM_VERSION:-0.19.1}" \
+    --cuda-version "${CUDA_VERSION:-12.6.3}" \
+    --vllm-version "${VLLM_VERSION:-0.22.1}" \
     --image-digest "${IMAGE_DIGEST:-}" \
     --mcp-servers "${MCP_SERVERS:-}" \
     --tool-spec-url "${TOOL_SPEC_URL:-}" \

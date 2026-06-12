@@ -80,6 +80,44 @@ type LoadRequest struct {
 	// `max_num_seqs exceeds available Mamba cache blocks` when the
 	// default (1024) is too large for the GPU. 0 means vLLM default.
 	MaxNumSeqs int `json:"max_num_seqs,omitempty"`
+
+	// EnableChunkedPrefill switches the prefill policy. Default (false)
+	// keeps the single-block reproducibility recipe:
+	// `--no-enable-chunked-prefill` with `--max-num-batched-tokens`
+	// forced to at least max_model_len so any prompt is one prefill
+	// step. That recipe scales the startup profile_run's activation
+	// reservation with max_model_len, which makes long-context
+	// deployments (>=128k) waste 15-25 GiB; for those, set this true
+	// and a bounded MaxNumBatchedTokens (default 32768 when chunked).
+	// Chunk boundaries change the FP reduction order, so record the
+	// choice in the reproducibility config — replay must use the same
+	// policy. See .operations/platform/confidential-ai/vllm-memory-tuning.md.
+	EnableChunkedPrefill bool `json:"enable_chunked_prefill,omitempty"`
+
+	// MaxNumBatchedTokens overrides `--max-num-batched-tokens`.
+	// 0 means: max(16384, max_model_len) when chunked prefill is off
+	// (the single-block invariant), 32768 when it is on. When chunked
+	// prefill is off the value is clamped up to max_model_len because
+	// vLLM refuses MNBT < max_model_len in that mode.
+	MaxNumBatchedTokens int `json:"max_num_batched_tokens,omitempty"`
+
+	// KVCacheDtype sets `--kv-cache-dtype` (e.g. "fp8"). Halves the
+	// attention KV footprint on the hybrid models (20 -> 10 KiB/token
+	// on Qwen3.6-35B). Changes outputs vs fp16 KV, so it is part of
+	// the attested config. Empty means vLLM default ("auto").
+	KVCacheDtype string `json:"kv_cache_dtype,omitempty"`
+
+	// MambaSSMCacheDtype sets `--mamba-ssm-cache-dtype` for the Gated
+	// DeltaNet recurrent state (~31 MiB/seq bf16, double at float32).
+	// Pin it explicitly so a vLLM default change can never silently
+	// halve the available sequence slots. Empty means vLLM default.
+	MambaSSMCacheDtype string `json:"mamba_ssm_cache_dtype,omitempty"`
+
+	// MaxCudagraphCaptureSize caps `--max-cudagraph-capture-size`
+	// (vLLM default 512). Set it to MaxNumSeqs on memory-tight
+	// deployments — capturing graphs for batch sizes the scheduler
+	// will never admit only burns VRAM. 0 means vLLM default.
+	MaxCudagraphCaptureSize int `json:"max_cudagraph_capture_size,omitempty"`
 }
 
 // Status is the response for GET /v1/models/status.
@@ -345,49 +383,6 @@ func (m *Manager) doLoad(req LoadRequest) {
 	}
 	modelPath := m.resolveModelPath(loaderID)
 
-	// Build vLLM command.
-	//
-	// Reproducibility tradeoffs we accept:
-	//
-	//   * CUDA graphs ENABLED (no --enforce-eager). Graph capture +
-	//     replay is itself deterministic: same kernel DAG, same
-	//     memory offsets, same streams. Eager mode was costing ~30x
-	//     throughput for no determinism gain in our locked
-	//     environment (pinned kernel, NVIDIA driver, CUDA, vLLM
-	//     version, model digest).
-	//
-	//   * V1 engine ENABLED (no VLLM_USE_V1=0 env). The legacy V0
-	//     scheduler underutilises the H100 tensor cores; V1 was
-	//     historically avoided for reproducibility because of
-	//     chunked prefill (which can change the order of FP
-	//     reductions across prefill chunks), so we explicitly turn
-	//     chunked prefill off below and size the batch budget so
-	//     any prompt up to --max-model-len fits in a single
-	//     mathematical block.
-	//
-	//   * --max-num-batched-tokens is set to max(16384, max-model-len)
-	//     so the entire prompt fits in a single prefill step. With
-	//     --no-enable-chunked-prefill above, vLLM won't split a
-	//     prefill regardless of MNBT, so making MNBT *larger* than
-	//     max_model_len buys nothing and ONLY inflates profile_run's
-	//     dummy forward (vLLM does a peak-memory probe of MNBT
-	//     tokens at startup). Earlier this was set to 2*max-model-len,
-	//     which halved the achievable context on a fixed-VRAM GPU:
-	//     activations dominate at large MNBT and OOM'd inside
-	//     profile_run long before max_model_len became the bottleneck.
-	//
-	// What this still does NOT guarantee: batch-invariance. With
-	// continuous batching, two concurrent requests may see
-	// different reductions across the batch dimension. Determinism
-	// holds per-request when traffic is serialised; for true
-	// concurrent determinism we need batch-invariant kernels
-	// (FlashInfer / vLLM batch-invariant attention), tracked
-	// separately.
-	batchedTokens := req.MaxModelLen
-	if batchedTokens < 16384 {
-		batchedTokens = 16384
-	}
-
 	// Sensible defaults for known model families. Callers (the seed
 	// scripts, the management-service, ad-hoc /v1/models/load) don't
 	// have to know which architecture-specific reasoning + tool
@@ -447,58 +442,7 @@ func (m *Manager) doLoad(req LoadRequest) {
 		}
 	}
 
-	// Use a short, stable served-model-name. If the caller passed an
-	// absolute filesystem path (e.g. "/models/qwen36-35b-a3b-fp8"),
-	// vLLM would otherwise advertise the full path as the model id,
-	// which doesn't match what UI clients send and produces a 404 from
-	// vLLM ("model X does not exist"). Strip to basename so the served
-	// name matches the directory name under modelsDir.
-	servedName := req.Model
-	if filepath.IsAbs(servedName) {
-		servedName = filepath.Base(servedName)
-	}
-	args := []string{
-		"serve", modelPath,
-		"--served-model-name", servedName,
-		"--seed", "0",
-		"--tensor-parallel-size", "1",
-		"--no-enable-chunked-prefill",
-		"--max-num-batched-tokens", fmt.Sprintf("%d", batchedTokens),
-		"--no-enable-log-requests",
-		"--max-model-len", fmt.Sprintf("%d", req.MaxModelLen),
-		"--gpu-memory-utilization", fmt.Sprintf("%.2f", req.GPUMemoryUtilization),
-		"--dtype", req.Dtype,
-		"--port", fmt.Sprintf("%d", m.vllmPort),
-	}
-	if req.MaxNumSeqs > 0 {
-		args = append(args, "--max-num-seqs", fmt.Sprintf("%d", req.MaxNumSeqs))
-	}
-	if req.Quantization != "" && req.Quantization != "none" {
-		args = append(args, "--quantization", req.Quantization)
-	}
-	if req.ReasoningParser != "" {
-		args = append(args, "--reasoning-parser", req.ReasoningParser)
-	}
-	if req.ToolCallParser != "" {
-		args = append(args, "--tool-call-parser", req.ToolCallParser)
-	}
-	if req.EnableAutoToolChoice {
-		args = append(args, "--enable-auto-tool-choice")
-	}
-	if req.ChatTemplate != "" {
-		// Convenience: shorthand like "gemma4" resolves to the official
-		// template baked into /opt/vllm-templates by the prod image.
-		// Anything else is forwarded verbatim so callers can also point
-		// at a custom path.
-		path := req.ChatTemplate
-		if !strings.ContainsAny(path, "/.") {
-			path = "/opt/vllm-templates/tool_chat_template_" + path + ".jinja"
-		}
-		args = append(args, "--chat-template", path)
-	}
-	if req.EnableThinking {
-		args = append(args, "--default-chat-template-kwargs", `{"enable_thinking": true}`)
-	}
+	args := buildVLLMArgs(req, modelPath, m.vllmPort)
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
 	cmd.Env = append(os.Environ(),
@@ -587,6 +531,128 @@ func (m *Manager) doLoad(req LoadRequest) {
 		}
 		m.mu.Unlock()
 	}
+}
+
+// buildVLLMArgs translates a LoadRequest (with defaults already
+// applied) into the `vllm serve` argv. Split out of doLoad so the flag
+// policy is unit-testable.
+//
+// Reproducibility tradeoffs we accept:
+//
+//   - CUDA graphs ENABLED (no --enforce-eager). Graph capture +
+//     replay is itself deterministic: same kernel DAG, same memory
+//     offsets, same streams. Eager mode was costing ~30x throughput
+//     for no determinism gain in our locked environment (pinned
+//     kernel, NVIDIA driver, CUDA, vLLM version, model digest).
+//
+//   - V1 engine ENABLED (no VLLM_USE_V1=0 env). The legacy V0
+//     scheduler underutilises the H100 tensor cores.
+//
+//   - Prefill policy is per-deployment. Default (EnableChunkedPrefill
+//     false): chunked prefill OFF and --max-num-batched-tokens forced
+//     to max(16384, max_model_len) so any prompt up to max_model_len
+//     is one prefill step — chunk boundaries would change the order
+//     of FP reductions. The cost is that vLLM's startup profile_run
+//     does a dummy forward of MNBT tokens, so the activation
+//     reservation scales with max_model_len; at >=128k contexts that
+//     wastes 15-25 GiB that the KV + Mamba caches need. Long-context
+//     deployments set EnableChunkedPrefill with a bounded MNBT
+//     (default 32768) and record the policy in the attested config —
+//     replay must use the same chunking schedule. Note MNBT larger
+//     than necessary buys nothing and ONLY inflates profile_run
+//     (an earlier 2*max_model_len setting halved the achievable
+//     context before that was understood).
+//
+// What none of this guarantees: batch-invariance. With continuous
+// batching, two concurrent requests may see different reductions
+// across the batch dimension. Determinism holds per-request when
+// traffic is serialised; true concurrent determinism needs
+// batch-invariant kernels, which upstream does not yet support for
+// GDN models (vllm#42960).
+func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
+	// Use a short, stable served-model-name. If the caller passed an
+	// absolute filesystem path (e.g. "/models/qwen36-35b-a3b-fp8"),
+	// vLLM would otherwise advertise the full path as the model id,
+	// which doesn't match what UI clients send and produces a 404 from
+	// vLLM ("model X does not exist"). Strip to basename so the served
+	// name matches the directory name under modelsDir.
+	servedName := req.Model
+	if filepath.IsAbs(servedName) {
+		servedName = filepath.Base(servedName)
+	}
+
+	args := []string{
+		"serve", modelPath,
+		"--served-model-name", servedName,
+		"--seed", "0",
+		"--tensor-parallel-size", "1",
+	}
+
+	batchedTokens := req.MaxNumBatchedTokens
+	if req.EnableChunkedPrefill {
+		if batchedTokens == 0 {
+			batchedTokens = 32768
+		}
+		args = append(args, "--enable-chunked-prefill")
+	} else {
+		// Single-block prefill: vLLM rejects MNBT < max_model_len in
+		// this mode, so clamp up rather than fail at engine init.
+		if batchedTokens < req.MaxModelLen {
+			batchedTokens = req.MaxModelLen
+		}
+		if batchedTokens < 16384 {
+			batchedTokens = 16384
+		}
+		args = append(args, "--no-enable-chunked-prefill")
+	}
+
+	args = append(args,
+		"--max-num-batched-tokens", fmt.Sprintf("%d", batchedTokens),
+		"--no-enable-log-requests",
+		"--max-model-len", fmt.Sprintf("%d", req.MaxModelLen),
+		"--gpu-memory-utilization", fmt.Sprintf("%.2f", req.GPUMemoryUtilization),
+		"--dtype", req.Dtype,
+		"--port", fmt.Sprintf("%d", port),
+	)
+	if req.MaxNumSeqs > 0 {
+		args = append(args, "--max-num-seqs", fmt.Sprintf("%d", req.MaxNumSeqs))
+	}
+	if req.KVCacheDtype != "" {
+		args = append(args, "--kv-cache-dtype", req.KVCacheDtype)
+	}
+	if req.MambaSSMCacheDtype != "" {
+		args = append(args, "--mamba-ssm-cache-dtype", req.MambaSSMCacheDtype)
+	}
+	if req.MaxCudagraphCaptureSize > 0 {
+		args = append(args, "--max-cudagraph-capture-size", fmt.Sprintf("%d", req.MaxCudagraphCaptureSize))
+	}
+	if req.Quantization != "" && req.Quantization != "none" {
+		args = append(args, "--quantization", req.Quantization)
+	}
+	if req.ReasoningParser != "" {
+		args = append(args, "--reasoning-parser", req.ReasoningParser)
+	}
+	if req.ToolCallParser != "" {
+		args = append(args, "--tool-call-parser", req.ToolCallParser)
+	}
+	if req.EnableAutoToolChoice {
+		args = append(args, "--enable-auto-tool-choice")
+	}
+	if req.ChatTemplate != "" {
+		// Convenience: shorthand like "gemma4" resolves to the official
+		// template baked into /opt/vllm-templates by the prod image.
+		// Anything else is forwarded verbatim so callers can also point
+		// at a custom path.
+		path := req.ChatTemplate
+		if !strings.ContainsAny(path, "/.") {
+			path = "/opt/vllm-templates/tool_chat_template_" + path + ".jinja"
+		}
+		args = append(args, "--chat-template", path)
+	}
+	if req.EnableThinking {
+		args = append(args, "--default-chat-template-kwargs", `{"enable_thinking": true}`)
+	}
+	return args
 }
 
 // resolveModelPath converts a model name to a filesystem path.

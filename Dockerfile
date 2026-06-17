@@ -26,7 +26,8 @@ COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 
 EXPOSE 8080
 
+# No --listen: the platform injects $PORT (config defaults to :$PORT). EXPOSE
+# above is documentation only (host networking ignores it).
 CMD ["confidential-ai", \
-     "--listen", ":8080", \
      "--vllm-upstream", "http://localhost:8000", \
      "--tee-type", "tdx"]

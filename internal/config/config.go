@@ -138,8 +138,8 @@ func Parse(args []string) (*Config, error) {
 
 	cfg := &Config{}
 
-	fs.StringVar(&cfg.Listen, "listen", envOr("LISTEN_ADDR", ":8080"),
-		"HTTP listen address (env: LISTEN_ADDR)")
+	fs.StringVar(&cfg.Listen, "listen", envOr("LISTEN_ADDR", defaultListenAddr()),
+		"HTTP listen address (env: LISTEN_ADDR; defaults to :$PORT when the platform allocates one)")
 	fs.StringVar(&cfg.VLLMUpstream, "vllm-upstream", envOr("VLLM_UPSTREAM", "http://localhost:8000"),
 		"vLLM backend URL (env: VLLM_UPSTREAM)")
 	fs.StringVar(&cfg.ModelsDir, "models-dir", envOr("MODELS_DIR", "/models"),
@@ -194,6 +194,16 @@ func Parse(args []string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// defaultListenAddr honours the platform-allocated $PORT (host networking
+// makes a container's listen port its host port, so the management-service
+// assigns it and injects PORT). Falls back to :8080 for local runs.
+func defaultListenAddr() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
 }
 
 func envOr(key, fallback string) string {

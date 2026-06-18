@@ -84,7 +84,7 @@ type Config struct {
 	// requests from any origin will be blocked by the SOP).
 	CORSOrigins string
 
-	// --- Billing (pricing-plan.md §6.3) ---
+	// --- Billing (the pricing model) ---
 	//
 	// The proxy meters every completed inference by the vLLM-reported
 	// prompt/completion token counts and pushes them, per request, to

@@ -38,7 +38,7 @@ type Handler struct {
 	agentConsent    *agent.ConsentRegistry
 
 	// billing meters completed inference and gates requests at zero
-	// balance (pricing-plan.md §6.3). Held behind an atomic pointer
+	// balance (the pricing model). Held behind an atomic pointer
 	// because POST /configure can swap the live Reporter at runtime
 	// (env vars are not deliverable to container apps; billing config
 	// arrives via the configure-then-freeze pattern). nil/Load()==nil
@@ -321,7 +321,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
-	// Balance gate (pricing-plan.md §6.3): refuse inference at zero balance
+	// Balance gate (the pricing model): refuse inference at zero balance
 	// on the tool-carrying path too, so it can't be used to bypass billing.
 	if h.billingReporter().Frozen() {
 		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
@@ -435,7 +435,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Balance gate (pricing-plan.md §6.3): refuse inference once the
+	// Balance gate (the pricing model): refuse inference once the
 	// account is out of credit. The freeze state is maintained by the
 	// billing reporter from the management-service's usage responses.
 	if h.billingReporter().Frozen() {
@@ -481,7 +481,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Billing (pricing-plan.md §6.3): when metering is enabled, streaming
+	// Billing (the pricing model): when metering is enabled, streaming
 	// responses carry no token usage unless we ask vLLM for it. Inject
 	// stream_options.include_usage so the upstream emits a final usage
 	// chunk; we record it and (unless the client opted in itself) strip it

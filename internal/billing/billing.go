@@ -1,6 +1,6 @@
 // Package billing meters completed inference requests and reports the
 // vLLM-observed token counts to the management-service AI-usage endpoint,
-// which performs the priced credit-ledger debit (pricing-plan.md §6.3).
+// which performs the priced credit-ledger debit (the pricing model).
 //
 // Design constraints:
 //

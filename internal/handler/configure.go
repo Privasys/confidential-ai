@@ -15,7 +15,7 @@ import (
 // shape persisted to the encrypted volume. It carries the four billing
 // values that env vars used to deliver; container apps receive per-deploy
 // configuration via the configure-then-freeze pattern instead (env vars are
-// not carried by the container load envelope — see README / pricing-plan.md
+// not carried by the container load envelope — see README / the pricing model
 // §6.3).
 //
 // Trust model: the manager freezes all non-/configure paths with HTTP 503

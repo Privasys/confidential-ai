@@ -111,7 +111,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		flusher.Flush()
 	}
 
-	// Billing (pricing-plan.md §6.3): the agentic path makes one or more
+	// Billing (the pricing model): the agentic path makes one or more
 	// upstream vLLM calls per request (one per tool-loop turn). Each call's
 	// token usage must be metered, exactly like the plain proxy paths. We
 	// record usage from every upstream response body — both the synthesised

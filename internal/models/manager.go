@@ -91,7 +91,7 @@ type LoadRequest struct {
 	// and a bounded MaxNumBatchedTokens (default 32768 when chunked).
 	// Chunk boundaries change the FP reduction order, so record the
 	// choice in the reproducibility config — replay must use the same
-	// policy. See .operations/platform/confidential-ai/vllm-memory-tuning.md.
+	// policy. See the vLLM memory-tuning notes.
 	EnableChunkedPrefill bool `json:"enable_chunked_prefill,omitempty"`
 
 	// MaxNumBatchedTokens overrides `--max-num-batched-tokens`.

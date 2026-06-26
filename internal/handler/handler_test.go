@@ -122,9 +122,10 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		}
 	}
 
-	// seed should be 0 (default)
-	if seed, ok := repro["seed"].(float64); !ok || seed != 0 {
-		t.Errorf("expected seed 0, got %v", repro["seed"])
+	// Unseeded requests get a random default seed (echoed for replay),
+	// which must be present and within numpy's valid range [0, 2^32).
+	if seed, ok := repro["seed"].(float64); !ok || seed < 0 || seed >= (1<<32) {
+		t.Errorf("expected a random default seed in [0, 2^32), got %v", repro["seed"])
 	}
 
 	// batch_invariance should be true
@@ -330,8 +331,8 @@ func TestStreamingChatCompletions(t *testing.T) {
 	if repro["tee_type"] != "tdx" {
 		t.Errorf("expected tee_type tdx, got %v", repro["tee_type"])
 	}
-	if seed, ok := repro["seed"].(float64); !ok || seed != 0 {
-		t.Errorf("expected seed 0, got %v", repro["seed"])
+	if seed, ok := repro["seed"].(float64); !ok || seed < 0 || seed >= (1<<32) {
+		t.Errorf("expected a random default seed in [0, 2^32), got %v", repro["seed"])
 	}
 
 	// Last should be [DONE]

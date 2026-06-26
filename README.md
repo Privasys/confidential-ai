@@ -18,7 +18,7 @@ Client
 
 The proxy:
 1. Receives OpenAI-compatible requests
-2. Injects `seed` if not present (default: 0)
+2. Injects a random `seed` if not present (echoed back for replay)
 3. Forwards to vLLM
 4. Wraps the response with `reproducibility` metadata block
 
@@ -30,7 +30,7 @@ Every inference response includes:
 {
   "reproducibility": {
     "request_id": "uuid",
-    "seed": 0,
+    "seed": 2863311530,
     "temperature": 0.7,
     "top_p": 0.95,
     "model": "Qwen/Qwen3.6-35B-A3B-FP8",

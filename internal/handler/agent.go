@@ -45,7 +45,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if reqParams.Seed == nil {
-		s := int64(0)
+		s := newSeed()
 		reqParams.Seed = &s
 	}
 	if reqParams.Temperature == 0 {

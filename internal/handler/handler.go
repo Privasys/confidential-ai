@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -335,15 +337,15 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
-	// Still inject seed=0 default so determinism guarantees hold even
-	// on the pass-through path.
+	// Inject a random seed default (echoed back) so unseeded requests stay
+	// replayable while still varying naturally on the pass-through path.
 	var reqParams requestParams
 	if err := json.Unmarshal(body, &reqParams); err != nil {
 		h.requestsFailed.Add(1)
 		writeError(w, http.StatusBadRequest, "invalid JSON request body")
 		return
 	}
-	seed := int64(0)
+	seed := newSeed()
 	if reqParams.Seed != nil {
 		seed = *reqParams.Seed
 	}
@@ -461,9 +463,10 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Defaults matching vLLM V1
+	// Default to a random seed (echoed in the reproducibility block) so
+	// chat output varies naturally yet every response stays replayable.
 	if reqParams.Seed == nil {
-		defaultSeed := int64(0)
+		defaultSeed := newSeed()
 		reqParams.Seed = &defaultSeed
 	}
 	if reqParams.Temperature == 0 {
@@ -976,6 +979,21 @@ type requestParams struct {
 	MaxTokens   int     `json:"max_tokens"`
 	Model       string  `json:"model"`
 	Stream      bool    `json:"stream"`
+}
+
+// newSeed returns a fresh random seed in numpy's valid range [0, 2^32).
+// vLLM feeds the seed to numpy/torch RNG, and numpy rejects seeds outside
+// that range. We default unseeded requests to a random seed (rather than a
+// fixed 0) so chat output varies naturally; the seed is echoed in the
+// reproducibility block, so any response remains replayable token-for-token.
+func newSeed() int64 {
+	var b [4]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// crypto/rand failure is effectively unreachable; fall back to a
+		// non-zero constant rather than silently pinning every request to 0.
+		return 1
+	}
+	return int64(binary.BigEndian.Uint32(b[:]))
 }
 
 // injectSeed ensures the "seed" field is present in the request JSON.

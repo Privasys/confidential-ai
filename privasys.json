@@ -27,8 +27,7 @@
           },
           "seed": {
             "type": "string",
-            "description": "Random seed for reproducible output (default: 0)",
-            "default": "0"
+            "description": "Random seed for reproducible output. If omitted, the proxy picks a random seed and returns it in the reproducibility block so the response can be replayed."
           }
         },
         "required": ["messages"]

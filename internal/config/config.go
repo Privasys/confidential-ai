@@ -78,6 +78,19 @@ type Config struct {
 	// Defaults to 60s when zero. Ignored when ToolSpecURL is empty.
 	ToolSpecInterval time.Duration
 
+	// ToolGrantJWKSURL, when non-empty, enables per-request user tool
+	// grants. The proxy verifies the X-Privasys-Tool-Grant header (an
+	// ES256 JWS minted by the chat back-end) against this JWKS and, for a
+	// valid grant, unions the grant's tool servers with the configured
+	// catalogue for that single request. The browser supplies only the
+	// grant, never a raw server URL. Empty disables the feature (the
+	// header is ignored and only the configured catalogue is used).
+	ToolGrantJWKSURL string
+
+	// ToolGrantAudience is the `aud` a grant must carry to be accepted —
+	// this instance's id. Empty skips the audience check (dev only).
+	ToolGrantAudience string
+
 	// CORSOrigins is a comma-separated allowlist of HTTP Origins that
 	// receive Access-Control-Allow-* response headers. Defaults to the
 	// Privasys chat front-ends. Empty disables CORS entirely (browser
@@ -176,6 +189,10 @@ func Parse(args []string) (*Config, error) {
 		"Bearer token sent on every tool-spec-url poll (env: TOOL_SPEC_TOKEN)")
 	fs.DurationVar(&cfg.ToolSpecInterval, "tool-spec-interval", envDuration("TOOL_SPEC_INTERVAL", 60*time.Second),
 		"How often to poll tool-spec-url (env: TOOL_SPEC_INTERVAL, e.g. 30s)")
+	fs.StringVar(&cfg.ToolGrantJWKSURL, "tool-grant-jwks-url", envOr("TOOL_GRANT_JWKS_URL", ""),
+		"When set, verify X-Privasys-Tool-Grant against this JWKS and union the grant's tools per request (env: TOOL_GRANT_JWKS_URL)")
+	fs.StringVar(&cfg.ToolGrantAudience, "tool-grant-audience", envOr("TOOL_GRANT_AUDIENCE", ""),
+		"Expected aud claim on a tool-grant (this instance's id); empty skips the check (env: TOOL_GRANT_AUDIENCE)")
 	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat-test.privasys.org,http://localhost:4210,http://localhost:3000"),
 		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
 

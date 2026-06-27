@@ -39,6 +39,12 @@ type Handler struct {
 	agentDispatcher *agent.Dispatcher
 	agentConsent    *agent.ConsentRegistry
 
+	// grantVerifier is non-nil when ToolGrantJWKSURL is configured. It
+	// verifies the per-request X-Privasys-Tool-Grant header so a user's
+	// own tools can be unioned with the configured catalogue for that
+	// request only.
+	grantVerifier *agent.GrantVerifier
+
 	// billing meters completed inference and gates requests at zero
 	// balance (the pricing model). Held behind an atomic pointer
 	// because POST /configure can swap the live Reporter at runtime
@@ -81,15 +87,21 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	}
 	if servers, err := agent.ParseServerSpec(cfg.MCPServers); err != nil {
 		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", err)
-	} else if len(servers) > 0 || cfg.ToolSpecURL != "" {
+	} else if len(servers) > 0 || cfg.ToolSpecURL != "" || cfg.ToolGrantJWKSURL != "" {
 		// The catalogue is always created when the puller is enabled,
 		// even if the static MCP_SERVERS is empty: the puller will
 		// populate it on first poll and may continue to mutate it as
-		// the fleet's tool set changes.
+		// the fleet's tool set changes. It is likewise created when only
+		// per-request tool grants are enabled, so the agentic path is
+		// reachable for fleets whose tools are all user-supplied.
 		h.agentCatalog = agent.NewCatalog(servers, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
 		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, &http.Client{Timeout: 60 * time.Second})
 		h.agentConsent = agent.NewConsentRegistry()
-		log.Printf("[agent] enabled (static-servers=%d, puller=%v)", len(servers), cfg.ToolSpecURL != "")
+		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "")
+	}
+	if cfg.ToolGrantJWKSURL != "" {
+		h.grantVerifier = agent.NewGrantVerifier(cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
+		log.Printf("[agent] per-request tool grants enabled (jwks=%s, aud=%q)", cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
 	}
 	modelSlug := cfg.BillingModel
 	if modelSlug == "" {

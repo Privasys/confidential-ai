@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -61,8 +62,29 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Resolve the catalogue for this request. By default it is the
+	// configured (admin/whitelist) catalogue. When a valid tool-grant is
+	// present, union the user's authorised tools into an ephemeral,
+	// request-scoped catalogue + dispatcher so concurrent sessions never
+	// see each other's tools.
+	cat := h.agentCatalog
+	disp := h.agentDispatcher
+	if h.grantVerifier != nil {
+		if gtok := r.Header.Get("X-Privasys-Tool-Grant"); gtok != "" {
+			gservers, gerr := h.grantVerifier.GrantServers(r.Context(), gtok)
+			if gerr != nil {
+				log.Printf("[agent] tool-grant rejected: %v", gerr)
+			} else if len(gservers) > 0 {
+				merged := agent.MergeServers(h.agentCatalog.Servers(), gservers)
+				cat = agent.NewCatalog(merged, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
+				disp = agent.NewDispatcher(cat, &http.Client{Timeout: 60 * time.Second})
+				defer cat.Close()
+			}
+		}
+	}
+
 	// Fetch tool catalogue and inject into request.
-	tools, _ := h.agentCatalog.Tools(r.Context())
+	tools, _ := cat.Tools(r.Context())
 	tools = filterToolsByHeader(tools, r.Header.Get("X-Privasys-Tools"))
 	body, err = agent.InjectTools(body, tools)
 	if err != nil {
@@ -173,7 +195,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	finalBody, results, err := agent.Run(r.Context(), h.agentDispatcher, body, agent.LoopOptions{
+	finalBody, results, err := agent.Run(r.Context(), disp, body, agent.LoopOptions{
 		Bearer:    bearer,
 		EmitEvent: emit,
 		Invoke:    invoke,

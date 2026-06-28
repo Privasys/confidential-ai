@@ -74,6 +74,11 @@ RUN chmod +x /opt/confidential-ai/entrypoint.sh
 # manager can discover and load any available model on-demand.
 LABEL ai.privasys.volume="/mnt:/models:ro"
 
+# GPU passthrough: this image declares the NVIDIA device nodes it needs, so
+# the manager passes them through (and enables CDI driver injection) on any
+# deploy without per-deploy configuration, mirroring the volume label above.
+LABEL ai.privasys.devices="/dev/nvidia0,/dev/nvidiactl,/dev/nvidia-uvm,/dev/nvidia-uvm-tools"
+
 # Dynamic model loading mode: Go proxy starts immediately, vLLM on-demand.
 ENV MODELS_DIR=/models
 # Pin the version reported in reproducibility metadata to the wheel

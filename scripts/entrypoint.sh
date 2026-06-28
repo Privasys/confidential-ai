@@ -15,7 +15,11 @@ set -euo pipefail
 MODELS_DIR="${MODELS_DIR:-}"
 MODEL_URL="${MODEL_URL:-}"
 MODEL_NAME="${MODEL_NAME:-}"
-PROXY_PORT="${LISTEN_ADDR:-:8080}"
+# Listen on the platform-allocated port. The host injects PORT; honour an
+# explicit LISTEN_ADDR override first, then :$PORT, falling back to :8080 for
+# local runs. Passing a fixed :8080 here breaks the manager health check, which
+# probes the allocated port.
+PROXY_PORT="${LISTEN_ADDR:-:${PORT:-8080}}"
 
 # Reproducibility environment (applies to both modes).
 #

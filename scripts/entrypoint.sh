@@ -16,10 +16,14 @@ MODELS_DIR="${MODELS_DIR:-}"
 MODEL_URL="${MODEL_URL:-}"
 MODEL_NAME="${MODEL_NAME:-}"
 # Listen on the platform-allocated port. The host injects PORT; honour an
-# explicit LISTEN_ADDR override first, then :$PORT, falling back to :8080 for
-# local runs. Passing a fixed :8080 here breaks the manager health check, which
-# probes the allocated port.
-PROXY_PORT="${LISTEN_ADDR:-:${PORT:-8080}}"
+# explicit LISTEN_ADDR override first, otherwise :$PORT. There is no hard-coded
+# fallback port — PORT (or LISTEN_ADDR) is required (the manager health check
+# probes the allocated port; a fixed guess would break it).
+PROXY_PORT="${LISTEN_ADDR:-${PORT:+:$PORT}}"
+if [[ -z "$PROXY_PORT" ]]; then
+  echo "[confidential-ai] ERROR: PORT (or LISTEN_ADDR) is required" >&2
+  exit 1
+fi
 
 # Reproducibility environment (applies to both modes).
 #

@@ -15,4 +15,4 @@ LABEL ai.privasys.volume="/mnt/model-mistral-small-24b:/models:ro"
 ENV MODEL_URL=file:///models
 ENV DTYPE=bfloat16
 
-EXPOSE 8000 8080
+EXPOSE 8000

@@ -9,7 +9,7 @@ Wraps [vLLM](https://github.com/vllm-project/vllm) and injects reproducibility m
 ```
 Client
   |
-  +--> confidential-ai proxy (Go, port 8080)
+  +--> confidential-ai proxy (Go, listens on the platform-injected $PORT)
          |
          +--> vLLM backend (Python, port 8000)
                 |
@@ -57,7 +57,7 @@ and compare output token-by-token.
 ```bash
 go build -o confidential-ai ./cmd/server/
 ./confidential-ai \
-  --listen :8080 \
+  --listen :8001 \
   --vllm-upstream http://localhost:8000 \
   --model Qwen/Qwen3.6-35B-A3B-FP8 \
   --gpu-type H100-80GB \
@@ -69,7 +69,7 @@ go build -o confidential-ai ./cmd/server/
 
 ```bash
 docker build -f Dockerfile.prod -t confidential-ai .
-docker run --gpus all -p 8080:8080 -p 8000:8000 \
+docker run --gpus all -e PORT=8001 -p 8001:8001 -p 8000:8000 \
   -e MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
   -e HF_TOKEN=<your-token> \
   -v model-cache:/root/.cache/huggingface \

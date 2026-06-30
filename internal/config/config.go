@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 )
@@ -210,17 +211,22 @@ func Parse(args []string) (*Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	if cfg.Listen == "" {
+		return nil, fmt.Errorf("listen address is required: set --listen, LISTEN_ADDR, or the platform-injected PORT")
+	}
 	return cfg, nil
 }
 
 // defaultListenAddr honours the platform-allocated $PORT (host networking
 // makes a container's listen port its host port, so the management-service
-// assigns it and injects PORT). Falls back to :8080 for local runs.
+// assigns it and injects PORT). Returns "" when neither PORT nor an explicit
+// --listen/LISTEN_ADDR is set — there is no hard-coded fallback port; the
+// caller rejects an empty listen address.
 func defaultListenAddr() string {
 	if p := os.Getenv("PORT"); p != "" {
 		return ":" + p
 	}
-	return ":8080"
+	return ""
 }
 
 func envOr(key, fallback string) string {

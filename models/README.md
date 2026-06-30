@@ -21,7 +21,7 @@ are preferred for CC because higher-precision weights are simpler to attest and 
 Use `Dockerfile.prod` with `MODEL_NAME` env var for any HuggingFace model:
 
 ```bash
-docker run --gpus all -p 8000:8000 -p 8080:8080 \
+docker run --gpus all -e PORT=8001 -p 8001:8001 -p 8000:8000 \
   -e MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
   -e HF_TOKEN=<token> \
   -v model-cache:/root/.cache/huggingface \

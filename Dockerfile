@@ -24,10 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 
-EXPOSE 8080
-
-# No --listen: the platform injects $PORT (config defaults to :$PORT). EXPOSE
-# above is documentation only (host networking ignores it).
+# No EXPOSE and no --listen: the platform injects $PORT and the proxy binds it
+# ($PORT is required, no hard-coded fallback). Host networking ignores EXPOSE.
 CMD ["confidential-ai", \
      "--vllm-upstream", "http://localhost:8000", \
      "--tee-type", "tdx"]

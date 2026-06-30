@@ -104,6 +104,8 @@ ENV CUDA_VERSION=12.6.3
 ENV VLLM_USE_DEEP_GEMM=0
 ENV VLLM_MOE_USE_DEEP_GEMM=0
 
-EXPOSE 8000 8080
+# 8000 is vLLM's fixed in-container port. The proxy binds the platform-injected
+# $PORT (no fixed port); host networking ignores EXPOSE anyway.
+EXPOSE 8000
 
 ENTRYPOINT ["/opt/confidential-ai/entrypoint.sh"]

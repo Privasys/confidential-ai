@@ -62,6 +62,17 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Inject the per-request dynamic context (wall clock) just before the
+	// latest user turn, recorded below for reproducible replay. Out of the
+	// static system prompt so that prefix stays cacheable.
+	dynCtx := dynamicContext(r)
+	body, err = injectDynamicContext(body, dynCtx)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject context")
+		return
+	}
+
 	// Resolve the catalogue for this request. By default it is the
 	// configured (admin/whitelist) catalogue. When a valid tool-grant is
 	// present, union the user's authorised tools into an ephemeral,
@@ -227,6 +238,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 	}
 
 	meta := h.buildMetadata(reqParams)
+	meta.DynamicContext = dynCtx
 	addToolCallsToMeta(meta, results)
 	wantRepro := wantsReproducibility(r)
 
@@ -346,20 +358,20 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 	}
 
 	type tcAccum struct {
-		ID       string
-		Type     string
-		Name     string
-		ArgsBuf  bytes.Buffer
+		ID      string
+		Type    string
+		Name    string
+		ArgsBuf bytes.Buffer
 	}
 	var (
-		contentBuf   bytes.Buffer
-		role         = "assistant"
-		finishReason string
-		idStr        string
-		objectStr    = "chat.completion"
-		createdNum   int64
-		modelStr     string
-		toolCalls    = map[int]*tcAccum{}
+		contentBuf       bytes.Buffer
+		role             = "assistant"
+		finishReason     string
+		idStr            string
+		objectStr        = "chat.completion"
+		createdNum       int64
+		modelStr         string
+		toolCalls        = map[int]*tcAccum{}
 		promptTokens     int64
 		completionTokens int64
 		usageSeen        bool

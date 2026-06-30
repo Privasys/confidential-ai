@@ -25,6 +25,14 @@ type Metadata struct {
 	TeeType            string  `json:"tee_type"`
 	Timestamp          string  `json:"timestamp"`
 
+	// DynamicContext is the per-request context block injected just before
+	// the latest user turn (currently the wall-clock time). It is recorded
+	// verbatim so a replay can reconstruct the exact prompt: re-issue the
+	// request with the X-Privasys-Dynamic-Context header set to this value
+	// (and the recorded seed) to reproduce the response token-for-token.
+	// Empty when nothing was injected.
+	DynamicContext string `json:"dynamic_context,omitempty"`
+
 	// ToolCalls, when non-nil, lists the MCP tool invocations that
 	// served this response (populated by the agentic loop). Each entry
 	// is a compact descriptor: {name, status, duration_ms, error?}.

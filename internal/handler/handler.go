@@ -496,6 +496,17 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Inject the per-request dynamic context (wall clock) just before the
+	// latest user turn, and record it for reproducible replay. Kept out of the
+	// static system prompt so that prompt stays a stable, cacheable prefix.
+	dynCtx := dynamicContext(r)
+	reqWithSeed, err = injectDynamicContext(reqWithSeed, dynCtx)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject context")
+		return
+	}
+
 	// Billing (the pricing model): when metering is enabled, streaming
 	// responses carry no token usage unless we ask vLLM for it. Inject
 	// stream_options.include_usage so the upstream emits a final usage
@@ -564,6 +575,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		h.cfg.ImageDigest,
 		h.cfg.TeeType,
 	)
+	meta.DynamicContext = dynCtx
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
@@ -885,15 +897,22 @@ func (h *Handler) modelsLoad(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(h.modelMgr.Status())
 }
 
-// modelsStatus handles GET /v1/models/status - returns model loading state.
+// modelsStatus handles GET /v1/models/status - returns model loading state
+// plus the slugs of models available on disk (so an orchestrator/portal can
+// offer a pick-list without a separate round-trip). `available` is omitted
+// on read errors rather than failing the status call.
 func (h *Handler) modelsStatus(w http.ResponseWriter, _ *http.Request) {
 	if h.modelMgr == nil {
 		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
 		return
 	}
 
+	avail, _ := h.modelMgr.ListAvailable()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.modelMgr.Status())
+	json.NewEncoder(w).Encode(struct {
+		models.Status
+		Available []string `json:"available,omitempty"`
+	}{h.modelMgr.Status(), avail})
 }
 
 // modelsUnload handles POST /v1/models/unload - stops vLLM and frees resources.
@@ -1018,6 +1037,61 @@ func injectSeed(body []byte, seed int64) ([]byte, error) {
 		m["seed"] = seed
 	}
 	return json.Marshal(m)
+}
+
+// dynamicContext returns the per-request context block injected just before the
+// latest user turn — currently the wall-clock time, so the model can answer
+// "what time is it?" without baking a timestamp into the (cacheable) system
+// prompt. A replay passes the recorded value back via the
+// X-Privasys-Dynamic-Context header so the prompt is reconstructed
+// byte-for-byte and the response stays reproducible; otherwise it is built from
+// the current UTC time. Returns "" only if the override header is explicitly
+// blank-after-trim AND there is no clock (unreachable), in practice non-empty.
+func dynamicContext(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Privasys-Dynamic-Context")); v != "" {
+		return v
+	}
+	return "Current date and time: " + time.Now().UTC().Format(time.RFC3339) + " (UTC)."
+}
+
+// injectDynamicContext prepends a delimited context block to the content of the
+// LAST user message, placing it as late as possible so the static system prompt
+// and the conversation history stay a stable, cacheable prefix (the time, which
+// changes every request, never perturbs that prefix). The block is recorded in
+// the reproducibility metadata (DynamicContext) for deterministic replay.
+//
+// Returns the body unchanged when ctx is empty, there is no user message, or
+// the content has a shape we cannot safely edit.
+func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
+	if ctx == "" {
+		return body, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	msgs, ok := m["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body, nil
+	}
+	block := "<context>\n" + ctx + "\n</context>\n\n"
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg, ok := msgs[i].(map[string]any)
+		if !ok || msg["role"] != "user" {
+			continue
+		}
+		switch c := msg["content"].(type) {
+		case string:
+			msg["content"] = block + c
+		case []any:
+			// Multimodal content (array of parts): prepend a text part.
+			msg["content"] = append([]any{map[string]any{"type": "text", "text": block}}, c...)
+		default:
+			return body, nil // unknown shape; leave untouched
+		}
+		return json.Marshal(m)
+	}
+	return body, nil // no user message to anchor against
 }
 
 // usageEnvelope is the minimal shape parsed off a vLLM completion (streaming

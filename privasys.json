@@ -81,55 +81,8 @@
       }
     },
     {
-      "name": "load_model",
-      "description": "Load a model into the confidential AI instance. The model can be a local directory name (e.g. qwen36-35b-a3b-fp8) or a HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8). Returns 202 Accepted with loading status.",
-      "endpoint": "/v1/models/load",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "model": {
-            "type": "string",
-            "description": "Model name: local directory (e.g. qwen36-35b-a3b-fp8) or HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8)"
-          },
-          "dtype": {
-            "type": "string",
-            "description": "Data type for model weights (auto, bfloat16, float16, float32)",
-            "default": "auto"
-          },
-          "quantization": {
-            "type": "string",
-            "description": "Quantization method (awq, gptq, int4, etc.)"
-          },
-          "max_model_len": {
-            "type": "string",
-            "description": "Maximum model context length",
-            "default": "262144"
-          },
-          "max_num_seqs": {
-            "type": "string",
-            "description": "vLLM --max-num-seqs cap. Lower this for very long contexts so KV cache fits (e.g. 4 for 256k on H100 80GB).",
-            "default": "4"
-          },
-          "gpu_memory_utilization": {
-            "type": "string",
-            "description": "GPU memory utilization (0.0-1.0)",
-            "default": "0.93"
-          }
-        },
-        "required": ["model"]
-      }
-    },
-    {
-      "name": "model_status",
-      "description": "Check model loading status. Returns state (idle, loading, ready, failed), progress, elapsed time, and error details.",
-      "endpoint": "/v1/models/status",
-      "inputSchema": {
-        "type": "object",
-        "properties": {}
-      }
-    },
-    {
       "name": "unload_model",
+      "role": "action",
       "description": "Unload the current model and stop vLLM. Frees GPU memory so a different model can be loaded.",
       "endpoint": "/v1/models/unload",
       "inputSchema": {
@@ -138,7 +91,18 @@
       }
     },
     {
+      "name": "model_status",
+      "role": "status",
+      "description": "Check model loading status. Returns state (idle, loading, ready, failed), progress, elapsed time, and error details.",
+      "endpoint": "/v1/models/status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
       "name": "readiness",
+      "role": "status",
       "description": "Check if the instance is ready to serve inference requests. Returns 200 when a model is loaded, 503 otherwise.",
       "endpoint": "/readiness",
       "inputSchema": {
@@ -147,6 +111,56 @@
       }
     }
   ],
+  "configure": {
+    "endpoint": "/v1/models/load",
+    "name": "load_model",
+    "readiness_path": "/readiness",
+    "title": "Model",
+    "description": "Load the model this instance serves. Inference stays unavailable until a model is loaded; a large model can take several minutes to load (follow progress with the model_status action).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Local directory (e.g. qwen36-35b-a3b-fp8) or a HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8).",
+          "x-privasys": {
+            "label": "Model",
+            "placeholder": "Qwen/Qwen3.6-35B-A3B-FP8"
+          }
+        },
+        "dtype": {
+          "type": "string",
+          "description": "Weight data type: auto, bfloat16, float16, float32.",
+          "default": "auto",
+          "x-privasys": { "label": "Data type" }
+        },
+        "quantization": {
+          "type": "string",
+          "description": "Quantization method (awq, gptq, int4, ...). Leave blank for none.",
+          "x-privasys": { "label": "Quantization" }
+        },
+        "max_model_len": {
+          "type": "string",
+          "description": "Maximum context length.",
+          "default": "262144",
+          "x-privasys": { "label": "Max context length" }
+        },
+        "max_num_seqs": {
+          "type": "string",
+          "description": "vLLM --max-num-seqs cap. Lower for very long contexts so the KV cache fits (e.g. 4 for 256k on H100 80GB).",
+          "default": "4",
+          "x-privasys": { "label": "Max sequences" }
+        },
+        "gpu_memory_utilization": {
+          "type": "string",
+          "description": "GPU memory utilization (0.0-1.0).",
+          "default": "0.93",
+          "x-privasys": { "label": "GPU memory utilisation" }
+        }
+      },
+      "required": ["model"]
+    }
+  },
   "ui": {
     "url": "https://raw.githubusercontent.com/Privasys/confidential-ai/main/ui/index.html",
     "label": "Chat"

@@ -62,7 +62,8 @@ func main() {
 
 	if cfg.ToolSpecURL != "" {
 		if cat := h.AgentCatalog(); cat != nil {
-			s := specsync.New(cfg.ToolSpecURL, cfg.ToolSpecToken, cfg.ToolSpecInterval, nil, cat)
+			s := specsync.New(cfg.ToolSpecURL, cfg.ToolSpecToken, cfg.ToolSpecInterval, nil, cat).
+				OnGrant(h.SetGrantVerifierFromSpec)
 			go s.Run(ctx)
 			logJSON("info", "tool-spec puller started", map[string]string{
 				"url":      cfg.ToolSpecURL,

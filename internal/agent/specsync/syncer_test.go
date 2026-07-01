@@ -150,3 +150,42 @@ func TestSyncerRecordsHTTPError(t *testing.T) {
 		t.Fatalf("expected LastGeneration empty on error, got %q", s.LastGeneration())
 	}
 }
+
+// TestSyncerInvokesOnGrant verifies the puller forwards the tool-grant config
+// (JWKS URL + audience) from the tool-spec response to the OnGrant callback,
+// which is how confidential-ai learns its grant config server-driven.
+func TestSyncerInvokesOnGrant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"spec":"","generation":"g1","fleet_id":"fleet-9",` +
+			`"tool_grant_jwks_url":"https://cs.example/.well-known/jwks.json",` +
+			`"tool_grant_audience":"fleet-9"}`))
+	}))
+	defer srv.Close()
+
+	var gotJWKS, gotAud atomic.Pointer[string]
+	cat := agent.NewCatalog(nil, nil, time.Hour)
+	s := New(srv.URL, "", 10*time.Millisecond, nil, cat).OnGrant(func(jwks, aud string) {
+		j, a := jwks, aud
+		gotJWKS.Store(&j)
+		gotAud.Store(&a)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if gotJWKS.Load() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if j := gotJWKS.Load(); j == nil || *j != "https://cs.example/.well-known/jwks.json" {
+		t.Fatalf("onGrant jwks = %v, want the chat-service jwks", j)
+	}
+	if a := gotAud.Load(); a == nil || *a != "fleet-9" {
+		t.Fatalf("onGrant aud = %v, want fleet-9", a)
+	}
+}

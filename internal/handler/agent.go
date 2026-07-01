@@ -80,9 +80,9 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 	// see each other's tools.
 	cat := h.agentCatalog
 	disp := h.agentDispatcher
-	if h.grantVerifier != nil {
+	if gv := h.grantVerifier.Load(); gv != nil {
 		if gtok := r.Header.Get("X-Privasys-Tool-Grant"); gtok != "" {
-			gservers, gerr := h.grantVerifier.GrantServers(r.Context(), gtok)
+			gservers, gerr := gv.GrantServers(r.Context(), gtok)
 			if gerr != nil {
 				log.Printf("[agent] tool-grant rejected: %v", gerr)
 			} else if len(gservers) > 0 {

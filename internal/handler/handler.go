@@ -39,11 +39,19 @@ type Handler struct {
 	agentDispatcher *agent.Dispatcher
 	agentConsent    *agent.ConsentRegistry
 
-	// grantVerifier is non-nil when ToolGrantJWKSURL is configured. It
-	// verifies the per-request X-Privasys-Tool-Grant header so a user's
-	// own tools can be unioned with the configured catalogue for that
-	// request only.
-	grantVerifier *agent.GrantVerifier
+	// grantVerifier verifies the per-request X-Privasys-Tool-Grant header so
+	// a user's own tools can be unioned with the configured catalogue for
+	// that request only. Held behind an atomic pointer because the tool-spec
+	// syncer installs/swaps it at runtime: env vars are not deliverable to
+	// container apps, so grant config (JWKS URL + audience) arrives
+	// server-driven from the mgmt-service tool-spec endpoint, exactly like
+	// MCP_SERVERS. nil / Load()==nil means grants are not configured.
+	grantVerifier atomic.Pointer[agent.GrantVerifier]
+	// grantMu serializes SetGrantVerifierFromSpec; grantJWKS/grantAud hold the
+	// live config so an unchanged tool-spec poll is a cheap no-op.
+	grantMu   sync.Mutex
+	grantJWKS string
+	grantAud  string
 
 	// oidcVerifier is non-nil when OIDCIssuer is configured. It validates
 	// platform bearer tokens offline (JWKS) so privileged endpoints
@@ -122,8 +130,9 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "")
 	}
 	if cfg.ToolGrantJWKSURL != "" {
-		h.grantVerifier = agent.NewGrantVerifier(cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
-		log.Printf("[agent] per-request tool grants enabled (jwks=%s, aud=%q)", cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
+		// Startup env path (kept for parity / non-fleet deployments). The
+		// tool-spec syncer can later swap this to server-driven config.
+		h.SetGrantVerifierFromSpec(cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
 	}
 	if cfg.OIDCIssuer != "" {
 		h.oidcVerifier = NewOIDCVerifier(cfg.OIDCIssuer, cfg.OIDCAudience)
@@ -149,6 +158,27 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 		log.Printf("[billing] inference metering enabled from env (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
 	}
 	return h
+}
+
+// SetGrantVerifierFromSpec installs (or swaps) the tool-grant verifier at
+// runtime from server-driven config delivered by the mgmt-service tool-spec
+// endpoint (the same channel that feeds MCP_SERVERS). Idempotent: an unchanged
+// (jwksURL, audience) is a no-op. An empty jwksURL clears the verifier
+// (grants disabled). Safe for concurrent callers.
+func (h *Handler) SetGrantVerifierFromSpec(jwksURL, audience string) {
+	h.grantMu.Lock()
+	defer h.grantMu.Unlock()
+	if jwksURL == h.grantJWKS && audience == h.grantAud {
+		return
+	}
+	h.grantJWKS, h.grantAud = jwksURL, audience
+	if jwksURL == "" {
+		h.grantVerifier.Store(nil)
+		log.Printf("[agent] per-request tool grants disabled")
+		return
+	}
+	h.grantVerifier.Store(agent.NewGrantVerifier(jwksURL, audience))
+	log.Printf("[agent] per-request tool grants enabled (jwks=%s, aud=%q)", jwksURL, audience)
 }
 
 // StartBilling starts the background usage-reporting loop, if metering is

@@ -44,9 +44,22 @@ type Syncer struct {
 	client   *http.Client
 	catalog  *agent.Catalog
 
+	// onGrant, when set, is called after every successful fetch with the
+	// response's tool-grant config so the handler can install/swap the grant
+	// verifier at runtime. The callback is expected to be idempotent (a
+	// no-op on unchanged config) since it fires on each poll.
+	onGrant func(jwksURL, audience string)
+
 	mu      sync.Mutex
 	lastGen string
 	lastErr error
+}
+
+// OnGrant registers a callback invoked with the tool-grant config on every
+// successful poll. Returns the syncer for chaining. Pass nil to clear.
+func (s *Syncer) OnGrant(fn func(jwksURL, audience string)) *Syncer {
+	s.onGrant = fn
+	return s
 }
 
 // Response is the JSON envelope returned by the tool-spec endpoint.
@@ -56,6 +69,13 @@ type Response struct {
 	Spec       string `json:"spec"`
 	Generation string `json:"generation"`
 	FleetID    string `json:"fleet_id,omitempty"`
+	// ToolGrantJWKSURL + ToolGrantAudience carry the per-request tool-grant
+	// config server-driven from the mgmt-service (JWKS is the chat-service
+	// signing key; audience is this fleet's id = the grant `aud`). Empty
+	// JWKS = grants disabled. Env vars aren't deliverable to container apps,
+	// so this endpoint is how confidential-ai learns them (like MCP_SERVERS).
+	ToolGrantJWKSURL  string `json:"tool_grant_jwks_url,omitempty"`
+	ToolGrantAudience string `json:"tool_grant_audience,omitempty"`
 }
 
 // New returns a Syncer configured against url. interval defaults to 60s
@@ -128,6 +148,12 @@ func (s *Syncer) pollOnce(ctx context.Context) error {
 	if err != nil {
 		s.recordErr(err)
 		return err
+	}
+	// Apply grant config every poll (before the generation short-circuit,
+	// which only tracks the tool set): the handler setter is idempotent so
+	// this is cheap, and it lets grant config change independently of tools.
+	if s.onGrant != nil {
+		s.onGrant(resp.ToolGrantJWKSURL, resp.ToolGrantAudience)
 	}
 	// Empty generation but non-empty spec is a server bug; treat the
 	// spec as authoritative and apply on every poll. Empty spec is OK

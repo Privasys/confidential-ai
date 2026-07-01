@@ -45,6 +45,12 @@ type Handler struct {
 	// request only.
 	grantVerifier *agent.GrantVerifier
 
+	// oidcVerifier is non-nil when OIDCIssuer is configured. It validates
+	// platform bearer tokens offline (JWKS) so privileged endpoints
+	// (model load/unload) can require the manager role, mirroring the
+	// enclave manager's own auth model.
+	oidcVerifier *OIDCVerifier
+
 	// billing meters completed inference and gates requests at zero
 	// balance (the pricing model). Held behind an atomic pointer
 	// because POST /configure can swap the live Reporter at runtime
@@ -102,6 +108,10 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	if cfg.ToolGrantJWKSURL != "" {
 		h.grantVerifier = agent.NewGrantVerifier(cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
 		log.Printf("[agent] per-request tool grants enabled (jwks=%s, aud=%q)", cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
+	}
+	if cfg.OIDCIssuer != "" {
+		h.oidcVerifier = NewOIDCVerifier(cfg.OIDCIssuer, cfg.OIDCAudience)
+		log.Printf("[auth] OIDC load/unload gate enabled (issuer=%s, role=%s)", cfg.OIDCIssuer, cfg.ManagerRole)
 	}
 	modelSlug := cfg.BillingModel
 	if modelSlug == "" {
@@ -219,9 +229,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("GET /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models", h.models)
-	mux.HandleFunc("POST /v1/models/load", h.requireLoadToken(h.modelsLoad))
+	mux.HandleFunc("POST /v1/models/load", h.requireLoadAuth(h.modelsLoad))
 	mux.HandleFunc("GET /v1/models/status", h.modelsStatus)
-	mux.HandleFunc("POST /v1/models/unload", h.requireLoadToken(h.modelsUnload))
+	mux.HandleFunc("POST /v1/models/unload", h.requireLoadAuth(h.modelsUnload))
 	mux.HandleFunc("GET /readiness", h.readiness)
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("POST /health", h.health)
@@ -233,15 +243,21 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /configure", h.configure)
 }
 
-// requireLoadToken gates a handler behind the static load token defined in
-// config.LoadToken. When LoadToken is empty the handler is reachable
-// without authentication (legacy / dev). When set, callers must present
-// `Authorization: Bearer <LoadToken>`. The fleet manager / orchestrator
-// holds this token; end users never do.
-func (h *Handler) requireLoadToken(next http.HandlerFunc) http.HandlerFunc {
+// requireLoadAuth gates model load/unload. Authorisation order:
+//
+//  1. When an OIDC verifier is configured (the default), the caller must
+//     present a platform bearer carrying the manager role. This is what the
+//     management-service service account presents, and mirrors the enclave
+//     manager's own auth model, so no per-app shared secret is needed.
+//  2. A non-empty static LoadToken is accepted as a LEGACY FALLBACK for the
+//     direct CLI/owner path during migration.
+//  3. When neither is configured the endpoint is open (dev mode).
+//
+// The end user never holds either credential; load/unload is manager-only.
+func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.LoadToken == "" {
-			next(w, r)
+		if h.oidcVerifier == nil && h.cfg.LoadToken == "" {
+			next(w, r) // dev mode: no auth configured
 			return
 		}
 		authz := r.Header.Get("Authorization")
@@ -250,6 +266,27 @@ func (h *Handler) requireLoadToken(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		token := strings.TrimPrefix(authz, "Bearer ")
+
+		if h.oidcVerifier != nil {
+			claims, err := h.oidcVerifier.Verify(r.Context(), token)
+			if err == nil {
+				if claims.HasRole(h.cfg.ManagerRole) {
+					next(w, r)
+					return
+				}
+				writeError(w, http.StatusForbidden, "requires "+h.cfg.ManagerRole+" role")
+				return
+			}
+			// OIDC verification failed: fall back to the legacy static token.
+			if h.cfg.LoadToken != "" && subtleEq(token, h.cfg.LoadToken) {
+				next(w, r)
+				return
+			}
+			writeError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+
+		// Legacy-only path (OIDC disabled, static token configured).
 		if subtleEq(token, h.cfg.LoadToken) {
 			next(w, r)
 			return
@@ -1051,17 +1088,21 @@ func dynamicContext(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Privasys-Dynamic-Context")); v != "" {
 		return v
 	}
-	return "Current date and time: " + time.Now().UTC().Format(time.RFC3339) + " (UTC)."
+	return "The current date and time is " + time.Now().UTC().Format(time.RFC3339) +
+		" (UTC). Treat this as the present moment when answering."
 }
 
-// injectDynamicContext prepends a delimited context block to the content of the
-// LAST user message, placing it as late as possible so the static system prompt
-// and the conversation history stay a stable, cacheable prefix (the time, which
-// changes every request, never perturbs that prefix). The block is recorded in
-// the reproducibility metadata (DynamicContext) for deterministic replay.
+// injectDynamicContext inserts a dedicated system message carrying the
+// per-request context (the wall clock) immediately BEFORE the last user turn.
+// A reasoning model disregards a context line buried inside the user message
+// (it falls back to "I have no clock"), so the context must arrive with system
+// authority, the way OpenAI/Anthropic feed the current date. Placing it right
+// before the last user turn keeps the static system prompt and the conversation
+// history a stable, cacheable prefix (the time, which changes every request,
+// never perturbs that prefix). The exact string is recorded in the
+// reproducibility metadata (DynamicContext) for deterministic replay.
 //
-// Returns the body unchanged when ctx is empty, there is no user message, or
-// the content has a shape we cannot safely edit.
+// Returns the body unchanged when ctx is empty or there is no user message.
 func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if ctx == "" {
 		return body, nil
@@ -1074,24 +1115,24 @@ func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if !ok || len(msgs) == 0 {
 		return body, nil
 	}
-	block := "<context>\n" + ctx + "\n</context>\n\n"
+	last := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
-		msg, ok := msgs[i].(map[string]any)
-		if !ok || msg["role"] != "user" {
-			continue
+		if msg, ok := msgs[i].(map[string]any); ok && msg["role"] == "user" {
+			last = i
+			break
 		}
-		switch c := msg["content"].(type) {
-		case string:
-			msg["content"] = block + c
-		case []any:
-			// Multimodal content (array of parts): prepend a text part.
-			msg["content"] = append([]any{map[string]any{"type": "text", "text": block}}, c...)
-		default:
-			return body, nil // unknown shape; leave untouched
-		}
-		return json.Marshal(m)
 	}
-	return body, nil // no user message to anchor against
+	if last < 0 {
+		return body, nil // no user message to anchor against
+	}
+	sysMsg := map[string]any{"role": "system", "content": ctx}
+	// Insert sysMsg at index `last`, shifting the user turn (and anything
+	// after it) right by one.
+	msgs = append(msgs, nil)
+	copy(msgs[last+1:], msgs[last:])
+	msgs[last] = sysMsg
+	m["messages"] = msgs
+	return json.Marshal(m)
 }
 
 // usageEnvelope is the minimal shape parsed off a vLLM completion (streaming

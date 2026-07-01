@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-func TestInjectDynamicContext_PrependsLastUserMessage(t *testing.T) {
+func TestInjectDynamicContext_InsertsSystemBeforeLastUser(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[` +
 		`{"role":"system","content":"STATIC PROMPT"},` +
 		`{"role":"user","content":"hello"},` +
 		`{"role":"assistant","content":"hi"},` +
 		`{"role":"user","content":"what time is it?"}` +
 		`]}`)
-	out, err := injectDynamicContext(body, "Current date and time: 2026-06-30T20:48:00Z (UTC).")
+	out, err := injectDynamicContext(body, "The current date and time is 2026-06-30T20:48:00Z (UTC).")
 	if err != nil {
 		t.Fatalf("injectDynamicContext: %v", err)
 	}
@@ -27,23 +27,28 @@ func TestInjectDynamicContext_PrependsLastUserMessage(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Static system prompt must be untouched (cacheable prefix).
+	// One message inserted; original four preserved.
+	if len(m.Messages) != 5 {
+		t.Fatalf("expected 5 messages, got %d", len(m.Messages))
+	}
+	// Static system prompt stays first (cacheable prefix), history untouched.
 	if m.Messages[0].Content != "STATIC PROMPT" {
 		t.Errorf("system prompt mutated: %q", m.Messages[0].Content)
 	}
-	// First user turn must be untouched — only the LAST user message gets it.
-	if m.Messages[1].Content != "hello" {
-		t.Errorf("earlier user turn mutated: %q", m.Messages[1].Content)
+	if m.Messages[1].Content != "hello" || m.Messages[1].Role != "user" {
+		t.Errorf("earlier user turn mutated: %+v", m.Messages[1])
 	}
-	last := m.Messages[3].Content
-	if !strings.Contains(last, "2026-06-30T20:48:00Z") {
-		t.Errorf("context not injected into last user turn: %q", last)
+	// The injected context is a dedicated system message right before the
+	// last user turn.
+	if m.Messages[3].Role != "system" {
+		t.Errorf("expected injected system message at index 3, got role %q", m.Messages[3].Role)
 	}
-	if !strings.HasSuffix(last, "what time is it?") {
-		t.Errorf("original user text not preserved: %q", last)
+	if !strings.Contains(m.Messages[3].Content, "2026-06-30T20:48:00Z") {
+		t.Errorf("time not in injected system message: %q", m.Messages[3].Content)
 	}
-	if !strings.HasPrefix(last, "<context>") {
-		t.Errorf("context block not at the start: %q", last)
+	// The last user message is unchanged and stays last.
+	if m.Messages[4].Role != "user" || m.Messages[4].Content != "what time is it?" {
+		t.Errorf("last user turn changed: %+v", m.Messages[4])
 	}
 }
 
@@ -77,7 +82,7 @@ func TestDynamicContext_HeaderOverrideForReplay(t *testing.T) {
 func TestDynamicContext_DefaultsToClock(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	got := dynamicContext(r)
-	if !strings.HasPrefix(got, "Current date and time:") {
+	if !strings.HasPrefix(got, "The current date and time is ") {
 		t.Errorf("expected a clock context, got %q", got)
 	}
 }

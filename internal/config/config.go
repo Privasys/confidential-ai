@@ -38,11 +38,28 @@ type Config struct {
 	// orchestration. Empty disables the feature.
 	StateFile string
 
-	// LoadToken, when non-empty, is required as Bearer credential on
-	// POST /v1/models/load and POST /v1/models/unload. Issued to the
-	// fleet manager / orchestrator only. When empty, the endpoints
-	// remain open (legacy / dev mode).
+	// LoadToken, when non-empty, is accepted as a Bearer credential on
+	// POST /v1/models/load and POST /v1/models/unload. It is now a LEGACY
+	// FALLBACK for the direct CLI/owner path: the primary gate is the
+	// OIDC manager role (see OIDCIssuer/ManagerRole). When both LoadToken
+	// and OIDCIssuer are empty the endpoints remain open (dev mode).
 	LoadToken string
+
+	// OIDCIssuer is the platform OIDC issuer whose JWKS validates bearer
+	// tokens on privileged endpoints. When non-empty, /v1/models/{load,
+	// unload} require a token from this issuer carrying ManagerRole (the
+	// management-service service account presents exactly such a token).
+	// This mirrors the enclave manager's own auth model. env: OIDC_ISSUER.
+	OIDCIssuer string
+
+	// OIDCAudience, when non-empty, is the required `aud` on a verified
+	// token. Empty skips the audience check. env: OIDC_AUDIENCE.
+	OIDCAudience string
+
+	// ManagerRole is the role a token must carry (in the `roles` claim)
+	// to load/unload models. Default: privasys-platform:manager.
+	// env: MANAGER_ROLE.
+	ManagerRole string
 
 	// MCPServers, when non-empty, enables the agentic tool-call loop
 	// on POST /v1/chat/completions. Format (env MCP_SERVERS):
@@ -181,7 +198,13 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&cfg.StateFile, "state-file", envOr("STATE_FILE", "/data/last-load.json"),
 		"Path where the last successful Load request is persisted for auto-restore on restart (env: STATE_FILE; empty disables)")
 	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
-		"Bearer token required on /v1/models/{load,unload}; empty disables auth (env: LOAD_TOKEN)")
+		"Legacy fallback bearer accepted on /v1/models/{load,unload} alongside the OIDC manager role (env: LOAD_TOKEN)")
+	fs.StringVar(&cfg.OIDCIssuer, "oidc-issuer", envOr("OIDC_ISSUER", "https://privasys.id"),
+		"Platform OIDC issuer whose JWKS validates privileged bearer tokens; empty disables OIDC auth (env: OIDC_ISSUER)")
+	fs.StringVar(&cfg.OIDCAudience, "oidc-audience", envOr("OIDC_AUDIENCE", ""),
+		"Required aud on a verified token; empty skips the audience check (env: OIDC_AUDIENCE)")
+	fs.StringVar(&cfg.ManagerRole, "manager-role", envOr("MANAGER_ROLE", "privasys-platform:manager"),
+		"Role required on /v1/models/{load,unload} tokens (env: MANAGER_ROLE)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
 	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),

@@ -45,6 +45,65 @@ type OIDCClaims struct {
 	Roles   []string
 }
 
+// callerCtxKey carries the verified inference caller's subject through the
+// request context so the metering path (per-caller billing) can attribute usage.
+type callerCtxKey struct{}
+
+// callerFromContext returns the verified caller subject stashed by the inference
+// handlers, or "" when the request was anonymous.
+func callerFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(callerCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// resolveCaller extracts the end-user credential from X-App-Auth (the proxied
+// path, forwarded by the management-service) or the Authorization bearer (a
+// direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
+// returns its subject. Returns ("", nil) when no credential is present and
+// ("", err) when a credential is present but invalid. A platform API key is just
+// a long-lived signed token, so it verifies through the same path.
+func (h *Handler) resolveCaller(r *http.Request) (string, error) {
+	tok := strings.TrimSpace(r.Header.Get("X-App-Auth"))
+	if tok == "" {
+		if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
+			tok = strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+		}
+	}
+	if tok == "" {
+		return "", nil // anonymous
+	}
+	if h.oidcVerifier == nil {
+		return "", nil // no issuer configured; cannot verify, treat as anonymous
+	}
+	claims, err := h.oidcVerifier.Verify(r.Context(), tok)
+	if err != nil {
+		return "", err
+	}
+	return claims.Subject, nil
+}
+
+// authorizeInference resolves the end-user on an inference request and, when
+// InferenceAuthRequired is set, rejects an anonymous/invalid caller with 401.
+// On success it returns the request carrying the verified caller subject in
+// context (empty when anonymous and auth is not required) for the metering path.
+func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
+	sub, err := h.resolveCaller(r)
+	if h.cfg.InferenceAuthRequired && sub == "" {
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid credential")
+		} else {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+		}
+		return r, false
+	}
+	if sub != "" {
+		r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, sub))
+	}
+	return r, true
+}
+
 // HasRole reports whether the token carries the given role.
 func (c *OIDCClaims) HasRole(role string) bool {
 	for _, r := range c.Roles {

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -60,6 +61,16 @@ type Config struct {
 	// to load/unload models. Default: privasys-platform:manager.
 	// env: MANAGER_ROLE.
 	ManagerRole string
+
+	// InferenceAuthRequired, when true, rejects unauthenticated inference
+	// (POST /v1/chat/completions, /v1/completions) with 401. The caller is
+	// identified from the end-user JWT in X-App-Auth (proxied path) or
+	// Authorization: Bearer (direct OpenAI clients), verified against
+	// OIDCIssuer. When false (default) the caller is still resolved and
+	// attributed for metering when a valid token is present, but anonymous
+	// requests are allowed (so enabling per-caller billing does not break
+	// existing access before API keys are issued). env: INFERENCE_AUTH_REQUIRED.
+	InferenceAuthRequired bool
 
 	// MCPServers, when non-empty, enables the agentic tool-call loop
 	// on POST /v1/chat/completions. Format (env MCP_SERVERS):
@@ -205,6 +216,8 @@ func Parse(args []string) (*Config, error) {
 		"Required aud on a verified token; empty skips the audience check (env: OIDC_AUDIENCE)")
 	fs.StringVar(&cfg.ManagerRole, "manager-role", envOr("MANAGER_ROLE", "privasys-platform:manager"),
 		"Role required on /v1/models/{load,unload} tokens (env: MANAGER_ROLE)")
+	fs.BoolVar(&cfg.InferenceAuthRequired, "inference-auth-required", envBool("INFERENCE_AUTH_REQUIRED", false),
+		"Reject unauthenticated inference with 401; when false, callers are still attributed for metering when a token is present (env: INFERENCE_AUTH_REQUIRED)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
 	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),
@@ -257,6 +270,21 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

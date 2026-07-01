@@ -321,6 +321,10 @@ func subtleEq(a, b string) bool {
 // "malformed tool name (expected <server>__<tool>)". Detect that case
 // and use the plain pass-through proxy instead.
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	r, ok := h.authorizeInference(w, r)
+	if !ok {
+		return
+	}
 	if h.agentDispatcher != nil {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 		if err != nil {
@@ -359,6 +363,10 @@ func hasClientTools(body []byte) bool {
 
 // completions proxies to vLLM /v1/completions with reproducibility.
 func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
+	r, ok := h.authorizeInference(w, r)
+	if !ok {
+		return
+	}
 	h.proxyWithReproducibility(w, r, "/v1/completions")
 }
 

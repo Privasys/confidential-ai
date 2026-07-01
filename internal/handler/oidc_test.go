@@ -170,6 +170,67 @@ func TestRequireLoadAuth_LegacyFallbackAndDevMode(t *testing.T) {
 	}
 }
 
+func TestResolveCaller(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+	tok := mint(map[string]any{"iss": issuer, "sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix())})
+
+	// X-App-Auth (proxied path).
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("X-App-Auth", tok)
+	if sub, err := h.resolveCaller(r); err != nil || sub != "user-1" {
+		t.Fatalf("X-App-Auth: sub=%q err=%v", sub, err)
+	}
+	// Authorization bearer (direct OpenAI client).
+	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if sub, err := h.resolveCaller(r); err != nil || sub != "user-1" {
+		t.Fatalf("Authorization: sub=%q err=%v", sub, err)
+	}
+	// Anonymous.
+	if sub, err := h.resolveCaller(httptest.NewRequest("POST", "/", nil)); err != nil || sub != "" {
+		t.Fatalf("anon: sub=%q err=%v", sub, err)
+	}
+	// Invalid credential present.
+	r = httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("Authorization", "Bearer not.a.jwt")
+	if sub, err := h.resolveCaller(r); err == nil || sub != "" {
+		t.Fatalf("invalid: expected error, sub=%q err=%v", sub, err)
+	}
+}
+
+func TestAuthorizeInference(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	tok := mint(map[string]any{"iss": issuer, "sub": "user-2", "exp": float64(time.Now().Add(time.Hour).Unix())})
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	// Flag off + anonymous → allowed, no caller.
+	r2, ok := h.authorizeInference(httptest.NewRecorder(), httptest.NewRequest("POST", "/", nil))
+	if !ok || callerFromContext(r2.Context()) != "" {
+		t.Fatalf("flag off anon: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+	}
+	// Flag off + valid → allowed, caller attributed.
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-App-Auth", tok)
+	r2, ok = h.authorizeInference(httptest.NewRecorder(), r)
+	if !ok || callerFromContext(r2.Context()) != "user-2" {
+		t.Fatalf("flag off valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+	}
+	// Flag on + anonymous → 401.
+	h.cfg.InferenceAuthRequired = true
+	rec := httptest.NewRecorder()
+	if _, ok := h.authorizeInference(rec, httptest.NewRequest("POST", "/", nil)); ok || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("flag on anon: ok=%v code=%d", ok, rec.Code)
+	}
+	// Flag on + valid → allowed, caller attributed.
+	r = httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	r2, ok = h.authorizeInference(httptest.NewRecorder(), r)
+	if !ok || callerFromContext(r2.Context()) != "user-2" {
+		t.Fatalf("flag on valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+	}
+}
+
 func TestRequireLoadAuth_OIDCConfiguredLegacyFallback(t *testing.T) {
 	issuer, _ := jwksTestIDP(t)
 	h := &Handler{

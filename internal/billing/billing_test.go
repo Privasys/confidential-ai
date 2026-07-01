@@ -22,7 +22,7 @@ func TestNewDisabled(t *testing.T) {
 	if r.Frozen() {
 		t.Fatal("nil reporter must not be frozen")
 	}
-	r.Record("req", 1, 1) // must not panic
+	r.Record("req", "", 1, 1) // must not panic
 	r.Start(context.Background())
 }
 
@@ -68,7 +68,7 @@ func TestReporterReportsAndTracksFrozen(t *testing.T) {
 	defer cancel()
 	r.Start(ctx)
 
-	r.Record("req-1", 100, 50)
+	r.Record("req-1", "alice", 100, 50)
 
 	// Wait for the report to land.
 	select {
@@ -99,7 +99,7 @@ func TestReporterReportsAndTracksFrozen(t *testing.T) {
 
 func TestRecordIgnoresZeroTokens(t *testing.T) {
 	r := New(Config{AccountID: "a", ReportURL: "http://x"})
-	r.Record("req", 0, 0) // dropped, no enqueue
+	r.Record("req", "", 0, 0) // dropped, no enqueue
 	select {
 	case <-r.queue:
 		t.Fatal("zero-token sample should not be enqueued")

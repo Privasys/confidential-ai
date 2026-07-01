@@ -434,7 +434,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
 			if id, in, out, ok := extractUsage(respBody); ok {
-				rep.Record(id, in, out)
+				rep.Record(id, callerFromContext(r.Context()), in, out)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -559,7 +559,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// from the forwarded stream so the response shape is unchanged.
 	var meter *meterCtx
 	if rep := h.billingReporter(); rep != nil {
-		meter = &meterCtx{reporter: rep}
+		meter = &meterCtx{reporter: rep, caller: callerFromContext(r.Context())}
 		if reqParams.Stream {
 			clientHadUsage := false
 			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)
@@ -634,6 +634,9 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 // nil when inference metering is disabled.
 type meterCtx struct {
 	reporter *billing.Reporter
+	// caller is the verified end-user subject usage is attributed to (empty =
+	// deployment-owner account).
+	caller string
 	// suppressUsage strips the synthetic stream usage chunk we injected via
 	// stream_options.include_usage so a client that did not opt in still sees
 	// an unchanged stream.
@@ -645,7 +648,7 @@ func (m *meterCtx) record(requestID string, in, out int64) {
 	if m == nil {
 		return
 	}
-	m.reporter.Record(requestID, in, out)
+	m.reporter.Record(requestID, m.caller, in, out)
 }
 
 // wantsReproducibility reports whether the caller opted in to the

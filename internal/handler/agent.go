@@ -183,7 +183,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			})
 			if err == nil && rep != nil {
 				if id, in, o, ok := extractUsage(out); ok {
-					rep.Record(id, in, o)
+					rep.Record(id, callerFromContext(r.Context()), in, o)
 				}
 			}
 			return out, err
@@ -199,7 +199,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			out, err := h.callVLLM(ctx, b)
 			if err == nil && rep != nil {
 				if id, in, o, ok := extractUsage(out); ok {
-					rep.Record(id, in, o)
+					rep.Record(id, callerFromContext(r.Context()), in, o)
 				}
 			}
 			return out, err

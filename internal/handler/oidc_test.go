@@ -199,6 +199,30 @@ func TestResolveCaller(t *testing.T) {
 	}
 }
 
+func TestResolveCaller_RejectsRevokedSid(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	h := &Handler{
+		cfg:          &config.Config{OIDCIssuer: issuer},
+		oidcVerifier: NewOIDCVerifier(issuer, ""),
+		revoked:      newRevokedSet("", time.Minute),
+	}
+	tok := mint(map[string]any{"iss": issuer, "sub": "u", "sid": "sess-1", "exp": float64(time.Now().Add(time.Hour).Unix())})
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if sub, err := h.resolveCaller(r); err != nil || sub != "u" {
+		t.Fatalf("pre-revoke: sub=%q err=%v", sub, err)
+	}
+	// Revoke the session id.
+	h.revoked.mu.Lock()
+	h.revoked.set["sess-1"] = struct{}{}
+	h.revoked.mu.Unlock()
+	r = httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := h.resolveCaller(r); err == nil {
+		t.Fatal("expected revoked-sid rejection")
+	}
+}
+
 func TestAuthorizeInference(t *testing.T) {
 	issuer, mint := jwksTestIDP(t)
 	tok := mint(map[string]any{"iss": issuer, "sub": "user-2", "exp": float64(time.Now().Add(time.Hour).Unix())})

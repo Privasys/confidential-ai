@@ -51,6 +51,11 @@ type Handler struct {
 	// enclave manager's own auth model.
 	oidcVerifier *OIDCVerifier
 
+	// revoked, when non-nil, is the polled set of revoked session ids. An
+	// inference token whose sid is revoked is rejected (API-key revocation
+	// without a per-request callout).
+	revoked *revokedSet
+
 	// billing meters completed inference and gates requests at zero
 	// balance (the pricing model). Held behind an atomic pointer
 	// because POST /configure can swap the live Reporter at runtime
@@ -112,6 +117,12 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 	if cfg.OIDCIssuer != "" {
 		h.oidcVerifier = NewOIDCVerifier(cfg.OIDCIssuer, cfg.OIDCAudience)
 		log.Printf("[auth] OIDC load/unload gate enabled (issuer=%s, role=%s)", cfg.OIDCIssuer, cfg.ManagerRole)
+		revokedURL := cfg.RevokedSidsURL
+		if revokedURL == "" {
+			revokedURL = strings.TrimRight(cfg.OIDCIssuer, "/") + "/sessions/revoked"
+		}
+		h.revoked = newRevokedSet(revokedURL, cfg.RevokedSidsInterval)
+		log.Printf("[auth] revoked-sid poll enabled (url=%s)", revokedURL)
 	}
 	modelSlug := cfg.BillingModel
 	if modelSlug == "" {
@@ -142,6 +153,9 @@ func (h *Handler) StartBilling(ctx context.Context) {
 		rep.Start(loopCtx)
 		h.billingStop = cancel
 	}
+	// Start the revoked-sid poller on the same server lifetime (no-op when nil
+	// or unconfigured).
+	h.revoked.Start(ctx)
 }
 
 // ReconfigureBilling atomically swaps the live billing Reporter to one

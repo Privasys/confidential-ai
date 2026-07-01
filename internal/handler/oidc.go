@@ -43,6 +43,9 @@ type OIDCVerifier struct {
 type OIDCClaims struct {
 	Subject string
 	Roles   []string
+	// SID is the session id the token is bound to (revocation handle). Empty
+	// for tokens minted without a session.
+	SID string
 }
 
 // callerCtxKey carries the verified inference caller's subject through the
@@ -80,6 +83,11 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 	claims, err := h.oidcVerifier.Verify(r.Context(), tok)
 	if err != nil {
 		return "", err
+	}
+	// Reject a token whose session (API key) has been revoked. Checked against
+	// the polled revoked-sid set — no per-request callout.
+	if claims.SID != "" && h.revoked.Has(claims.SID) {
+		return "", errors.New("credential revoked")
 	}
 	return claims.Subject, nil
 }
@@ -182,7 +190,8 @@ func (v *OIDCVerifier) Verify(ctx context.Context, token string) (*OIDCClaims, e
 	}
 
 	sub, _ := claims["sub"].(string)
-	return &OIDCClaims{Subject: sub, Roles: oidcRoles(claims)}, nil
+	sid, _ := claims["sid"].(string)
+	return &OIDCClaims{Subject: sub, Roles: oidcRoles(claims), SID: sid}, nil
 }
 
 // oidcRoles extracts a string list from the `roles` claim (array form) and

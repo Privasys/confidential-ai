@@ -62,6 +62,16 @@ type Config struct {
 	// env: MANAGER_ROLE.
 	ManagerRole string
 
+	// RevokedSidsURL is the IdP feed of revoked session ids that the proxy
+	// polls so a revoked API key (a token whose sid was revoked) is rejected
+	// without a per-request callout. Empty derives it from OIDCIssuer
+	// (<issuer>/sessions/revoked). env: REVOKED_SIDS_URL.
+	RevokedSidsURL string
+
+	// RevokedSidsInterval is the revoked-sid poll cadence. Default 60s.
+	// env: REVOKED_SIDS_INTERVAL.
+	RevokedSidsInterval time.Duration
+
 	// InferenceAuthRequired, when true, rejects unauthenticated inference
 	// (POST /v1/chat/completions, /v1/completions) with 401. The caller is
 	// identified from the end-user JWT in X-App-Auth (proxied path) or
@@ -216,6 +226,10 @@ func Parse(args []string) (*Config, error) {
 		"Required aud on a verified token; empty skips the audience check (env: OIDC_AUDIENCE)")
 	fs.StringVar(&cfg.ManagerRole, "manager-role", envOr("MANAGER_ROLE", "privasys-platform:manager"),
 		"Role required on /v1/models/{load,unload} tokens (env: MANAGER_ROLE)")
+	fs.StringVar(&cfg.RevokedSidsURL, "revoked-sids-url", envOr("REVOKED_SIDS_URL", ""),
+		"IdP revoked-session feed to poll; empty derives <OIDC_ISSUER>/sessions/revoked (env: REVOKED_SIDS_URL)")
+	fs.DurationVar(&cfg.RevokedSidsInterval, "revoked-sids-interval", envDuration("REVOKED_SIDS_INTERVAL", 60*time.Second),
+		"Revoked-sid poll cadence (env: REVOKED_SIDS_INTERVAL)")
 	fs.BoolVar(&cfg.InferenceAuthRequired, "inference-auth-required", envBool("INFERENCE_AUTH_REQUIRED", false),
 		"Reject unauthenticated inference with 401; when false, callers are still attributed for metering when a token is present (env: INFERENCE_AUTH_REQUIRED)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),

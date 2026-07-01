@@ -93,12 +93,14 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 }
 
 // authorizeInference resolves the end-user on an inference request and, when
-// InferenceAuthRequired is set, rejects an anonymous/invalid caller with 401.
-// On success it returns the request carrying the verified caller subject in
-// context (empty when anonymous and auth is not required) for the metering path.
+// enforcement is on (h.inferenceAuth, seeded from InferenceAuthRequired and
+// overridable via POST /configure), rejects an anonymous/invalid/revoked caller
+// with 401. On success it returns the request carrying the verified caller
+// subject in context (empty when anonymous and auth is not required) for the
+// metering path.
 func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	sub, err := h.resolveCaller(r)
-	if h.cfg.InferenceAuthRequired && sub == "" {
+	if h.inferenceAuth.Load() && sub == "" {
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid credential")
 		} else {

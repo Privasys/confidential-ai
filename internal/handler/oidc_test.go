@@ -240,8 +240,9 @@ func TestAuthorizeInference(t *testing.T) {
 	if !ok || callerFromContext(r2.Context()) != "user-2" {
 		t.Fatalf("flag off valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
 	}
-	// Flag on + anonymous → 401.
-	h.cfg.InferenceAuthRequired = true
+	// Flag on + anonymous → 401. Enforcement is the runtime atomic (settable
+	// via /configure), not the raw cfg field.
+	h.inferenceAuth.Store(true)
 	rec := httptest.NewRecorder()
 	if _, ok := h.authorizeInference(rec, httptest.NewRequest("POST", "/", nil)); ok || rec.Code != http.StatusUnauthorized {
 		t.Fatalf("flag on anon: ok=%v code=%d", ok, rec.Code)

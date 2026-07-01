@@ -73,6 +73,13 @@ type Handler struct {
 	billingBaseCtx context.Context
 	billingStop    context.CancelFunc
 
+	// inferenceAuth mirrors cfg.InferenceAuthRequired but is settable at
+	// runtime via POST /configure (env vars are not deliverable to container
+	// apps). When true, anonymous/invalid/revoked callers are rejected on the
+	// inference endpoints; when false, a caller is still attributed for
+	// metering when a valid token is present. Read lock-free on the hot path.
+	inferenceAuth atomic.Bool
+
 	// ready is set to 1 once the vLLM upstream health check succeeds.
 	// Used only in legacy mode (when model is loaded at boot via entrypoint.sh).
 	ready atomic.Int32
@@ -92,6 +99,10 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 			Timeout: 5 * time.Minute, // LLM inference can be slow
 		},
 	}
+	// Seed the runtime enforcement flag from the (env) default; POST /configure
+	// may override it later, and RestorePersistedBilling re-applies any persisted
+	// value on restart.
+	h.inferenceAuth.Store(cfg.InferenceAuthRequired)
 	// Legacy mode: poll vLLM health at startup if model manager is not used.
 	if modelMgr == nil && cfg.ModelName != "" {
 		go h.pollUpstreamReady()

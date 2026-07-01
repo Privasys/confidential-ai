@@ -29,6 +29,14 @@ type billingConfigPayload struct {
 	UsageReportURL   string `json:"usage_report_url"`
 	UsageReportToken string `json:"usage_report_token"`
 	BillingModel     string `json:"billing_model"`
+
+	// InferenceAuthRequired toggles inference-auth enforcement at runtime.
+	// Env vars are not deliverable to container apps, so this is the only
+	// way to turn on enforcement for a deployed instance. A pointer so an
+	// omitted key leaves the current value untouched (a billing-only
+	// configure must not silently flip enforcement); when present it is
+	// applied and persisted, independent of the billing fields.
+	InferenceAuthRequired *bool `json:"inference_auth_required,omitempty"`
 }
 
 // toConfig maps the wire payload to a billing.Config, applying the same
@@ -85,11 +93,19 @@ func (h *Handler) configure(w http.ResponseWriter, r *http.Request) {
 	cfg := h.toConfig(p)
 	h.ReconfigureBilling(cfg)
 
+	// Apply the enforcement toggle independently of billing (only when the
+	// caller included the key).
+	if p.InferenceAuthRequired != nil {
+		h.inferenceAuth.Store(*p.InferenceAuthRequired)
+		log.Printf("[auth] inference-auth enforcement set to %v via configure", *p.InferenceAuthRequired)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":   "ok",
-		"metering": !cfg.Disabled(),
+		"status":                  "ok",
+		"metering":                !cfg.Disabled(),
+		"inference_auth_required": h.inferenceAuth.Load(),
 	})
 }
 
@@ -150,6 +166,12 @@ func (h *Handler) RestorePersistedBilling() {
 	if err := json.Unmarshal(buf, &p); err != nil {
 		log.Printf("[billing] persisted config is corrupt, ignoring: %v", err)
 		return
+	}
+	// Restore the enforcement toggle first, so it survives a restart even when
+	// billing is disabled (the early return below).
+	if p.InferenceAuthRequired != nil {
+		h.inferenceAuth.Store(*p.InferenceAuthRequired)
+		log.Printf("[auth] restored inference-auth enforcement = %v", *p.InferenceAuthRequired)
 	}
 	cfg := h.toConfig(p)
 	if cfg.Disabled() {

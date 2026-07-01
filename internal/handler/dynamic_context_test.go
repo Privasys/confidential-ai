@@ -7,7 +7,10 @@ import (
 	"testing"
 )
 
-func TestInjectDynamicContext_InsertsSystemBeforeLastUser(t *testing.T) {
+func TestInjectDynamicContext_InsertsAfterLeadingSystem(t *testing.T) {
+	// Multi-turn conversation with a leading system prompt: the injected
+	// context must land right after it (contiguous system run), NOT mid-
+	// conversation — vLLM rejects a system message after a non-system turn.
 	body := []byte(`{"model":"m","messages":[` +
 		`{"role":"system","content":"STATIC PROMPT"},` +
 		`{"role":"user","content":"hello"},` +
@@ -27,28 +30,51 @@ func TestInjectDynamicContext_InsertsSystemBeforeLastUser(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// One message inserted; original four preserved.
 	if len(m.Messages) != 5 {
 		t.Fatalf("expected 5 messages, got %d", len(m.Messages))
 	}
-	// Static system prompt stays first (cacheable prefix), history untouched.
-	if m.Messages[0].Content != "STATIC PROMPT" {
-		t.Errorf("system prompt mutated: %q", m.Messages[0].Content)
+	// Static system prompt stays message 0 (cacheable prefix).
+	if m.Messages[0].Role != "system" || m.Messages[0].Content != "STATIC PROMPT" {
+		t.Errorf("system prompt mutated: %+v", m.Messages[0])
 	}
-	if m.Messages[1].Content != "hello" || m.Messages[1].Role != "user" {
-		t.Errorf("earlier user turn mutated: %+v", m.Messages[1])
+	// The injected context is a system message at index 1 (end of the leading
+	// system run), so ALL system messages precede the first user turn.
+	if m.Messages[1].Role != "system" || !strings.Contains(m.Messages[1].Content, "2026-06-30T20:48:00Z") {
+		t.Errorf("expected injected system at index 1, got %+v", m.Messages[1])
 	}
-	// The injected context is a dedicated system message right before the
-	// last user turn.
-	if m.Messages[3].Role != "system" {
-		t.Errorf("expected injected system message at index 3, got role %q", m.Messages[3].Role)
+	// No system message may appear after a non-system message (vLLM constraint).
+	seenNonSystem := false
+	for i, mm := range m.Messages {
+		if mm.Role != "system" {
+			seenNonSystem = true
+		} else if seenNonSystem {
+			t.Errorf("system message at index %d follows a non-system message", i)
+		}
 	}
-	if !strings.Contains(m.Messages[3].Content, "2026-06-30T20:48:00Z") {
-		t.Errorf("time not in injected system message: %q", m.Messages[3].Content)
+	// History + last user turn preserved and in order.
+	if m.Messages[2].Content != "hello" || m.Messages[3].Content != "hi" || m.Messages[4].Content != "what time is it?" {
+		t.Errorf("conversation reordered: %+v", m.Messages)
 	}
-	// The last user message is unchanged and stays last.
-	if m.Messages[4].Role != "user" || m.Messages[4].Content != "what time is it?" {
-		t.Errorf("last user turn changed: %+v", m.Messages[4])
+}
+
+func TestInjectDynamicContext_NoLeadingSystem(t *testing.T) {
+	// No system prompt: the context becomes message 0.
+	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"time?"}]}`)
+	out, err := injectDynamicContext(body, "TIME-CTX")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var m struct {
+		Messages []struct{ Role, Content string } `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(m.Messages) != 4 || m.Messages[0].Role != "system" || m.Messages[0].Content != "TIME-CTX" {
+		t.Fatalf("expected injected system at index 0, got %+v", m.Messages)
+	}
+	if m.Messages[1].Role != "user" || m.Messages[1].Content != "hi" {
+		t.Errorf("first user turn changed: %+v", m.Messages[1])
 	}
 }
 

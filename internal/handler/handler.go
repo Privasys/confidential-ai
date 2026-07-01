@@ -1104,16 +1104,20 @@ func dynamicContext(r *http.Request) string {
 }
 
 // injectDynamicContext inserts a dedicated system message carrying the
-// per-request context (the wall clock) immediately BEFORE the last user turn.
-// A reasoning model disregards a context line buried inside the user message
-// (it falls back to "I have no clock"), so the context must arrive with system
-// authority, the way OpenAI/Anthropic feed the current date. Placing it right
-// before the last user turn keeps the static system prompt and the conversation
-// history a stable, cacheable prefix (the time, which changes every request,
-// never perturbs that prefix). The exact string is recorded in the
-// reproducibility metadata (DynamicContext) for deterministic replay.
+// per-request context (the wall clock) at the END of the leading run of system
+// messages, i.e. right after the static system prompt and before the first
+// non-system turn.
 //
-// Returns the body unchanged when ctx is empty or there is no user message.
+// It must be a system message (a reasoning model disregards a context line
+// buried in a user turn and falls back to "I have no clock"), and it must sit at
+// the beginning: vLLM rejects a system message that appears after any
+// non-system message ("System message must be at the beginning"), so it cannot
+// go just before the last user turn on a multi-turn conversation. Keeping the
+// static system prompt as message 0 leaves it available as a cacheable prefix.
+// The exact string is recorded in the reproducibility metadata (DynamicContext)
+// for deterministic replay.
+//
+// Returns the body unchanged when ctx is empty or there are no messages.
 func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if ctx == "" {
 		return body, nil
@@ -1126,22 +1130,22 @@ func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if !ok || len(msgs) == 0 {
 		return body, nil
 	}
-	last := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msg, ok := msgs[i].(map[string]any); ok && msg["role"] == "user" {
-			last = i
+	// Find the end of the leading run of system messages.
+	insertAt := 0
+	for insertAt < len(msgs) {
+		msg, ok := msgs[insertAt].(map[string]any)
+		if !ok || msg["role"] != "system" {
 			break
 		}
+		insertAt++
 	}
-	if last < 0 {
-		return body, nil // no user message to anchor against
+	if insertAt >= len(msgs) {
+		return body, nil // only system messages: no turn to answer, nothing to do
 	}
 	sysMsg := map[string]any{"role": "system", "content": ctx}
-	// Insert sysMsg at index `last`, shifting the user turn (and anything
-	// after it) right by one.
 	msgs = append(msgs, nil)
-	copy(msgs[last+1:], msgs[last:])
-	msgs[last] = sysMsg
+	copy(msgs[insertAt+1:], msgs[insertAt:])
+	msgs[insertAt] = sysMsg
 	m["messages"] = msgs
 	return json.Marshal(m)
 }

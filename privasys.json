@@ -149,7 +149,7 @@
         "max_num_seqs": {
           "type": "string",
           "description": "vLLM --max-num-seqs cap. Lower for very long contexts so the KV cache fits (e.g. 4 for 256k on H100 80GB).",
-          "default": "4",
+          "default": "256",
           "x-privasys": { "label": "Max sequences" }
         },
         "gpu_memory_utilization": {

@@ -267,9 +267,11 @@ func (m *Manager) Load(req LoadRequest) error {
 		// vLLM's own default (1024) is sized for serving clusters and
 		// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
 		// block per decode sequence) fail at KV-cache init on a single
-		// H100. 32 matches the concurrency this deployment is priced
-		// for and stays far below the Mamba block budget.
-		req.MaxNumSeqs = 32
+		// H100. NOTE: for such models a high value can still abort CUDA
+		// graph capture ("max_num_seqs exceeds available Mamba cache
+		// blocks") at long contexts — cap max_model_len accordingly, or
+		// lower this via the load request's max_num_seqs.
+		req.MaxNumSeqs = 256
 	}
 
 	m.state = StateLoading

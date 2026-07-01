@@ -141,21 +141,21 @@
           "x-privasys": { "label": "Quantization" }
         },
         "max_model_len": {
-          "type": "string",
+          "type": "integer",
           "description": "Maximum context length.",
-          "default": "262144",
+          "default": 262144,
           "x-privasys": { "label": "Max context length" }
         },
         "max_num_seqs": {
-          "type": "string",
+          "type": "integer",
           "description": "vLLM --max-num-seqs cap. Lower for very long contexts so the KV cache fits (e.g. 4 for 256k on H100 80GB).",
-          "default": "256",
+          "default": 256,
           "x-privasys": { "label": "Max sequences" }
         },
         "gpu_memory_utilization": {
-          "type": "string",
+          "type": "number",
           "description": "GPU memory utilization (0.0-1.0).",
-          "default": "0.93",
+          "default": 0.93,
           "x-privasys": { "label": "GPU memory utilisation" }
         }
       },

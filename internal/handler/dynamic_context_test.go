@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-func TestInjectDynamicContext_InsertsAfterLeadingSystem(t *testing.T) {
-	// Multi-turn conversation with a leading system prompt: the injected
-	// context must land right after it (contiguous system run), NOT mid-
-	// conversation — vLLM rejects a system message after a non-system turn.
+func TestInjectDynamicContext_MergesIntoLeadingSystem(t *testing.T) {
+	// Multi-turn conversation with a leading system prompt: the context must be
+	// APPENDED to it (one system message, first) — vLLM/Qwen reject both a
+	// mid-conversation system message and a second system message.
 	body := []byte(`{"model":"m","messages":[` +
 		`{"role":"system","content":"STATIC PROMPT"},` +
 		`{"role":"user","content":"hello"},` +
@@ -30,35 +30,31 @@ func TestInjectDynamicContext_InsertsAfterLeadingSystem(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(m.Messages) != 5 {
-		t.Fatalf("expected 5 messages, got %d", len(m.Messages))
+	// No message inserted — merged into the existing system prompt.
+	if len(m.Messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(m.Messages))
 	}
-	// Static system prompt stays message 0 (cacheable prefix).
-	if m.Messages[0].Role != "system" || m.Messages[0].Content != "STATIC PROMPT" {
-		t.Errorf("system prompt mutated: %+v", m.Messages[0])
+	// Exactly one system message, first, carrying both the static prompt and
+	// the injected time.
+	if m.Messages[0].Role != "system" {
+		t.Errorf("message 0 not system: %+v", m.Messages[0])
 	}
-	// The injected context is a system message at index 1 (end of the leading
-	// system run), so ALL system messages precede the first user turn.
-	if m.Messages[1].Role != "system" || !strings.Contains(m.Messages[1].Content, "2026-06-30T20:48:00Z") {
-		t.Errorf("expected injected system at index 1, got %+v", m.Messages[1])
+	if !strings.HasPrefix(m.Messages[0].Content, "STATIC PROMPT") || !strings.Contains(m.Messages[0].Content, "2026-06-30T20:48:00Z") {
+		t.Errorf("system prompt not merged: %q", m.Messages[0].Content)
 	}
-	// No system message may appear after a non-system message (vLLM constraint).
-	seenNonSystem := false
-	for i, mm := range m.Messages {
-		if mm.Role != "system" {
-			seenNonSystem = true
-		} else if seenNonSystem {
-			t.Errorf("system message at index %d follows a non-system message", i)
+	for i, mm := range m.Messages[1:] {
+		if mm.Role == "system" {
+			t.Errorf("unexpected extra system message at index %d", i+1)
 		}
 	}
-	// History + last user turn preserved and in order.
-	if m.Messages[2].Content != "hello" || m.Messages[3].Content != "hi" || m.Messages[4].Content != "what time is it?" {
-		t.Errorf("conversation reordered: %+v", m.Messages)
+	// Conversation preserved.
+	if m.Messages[1].Content != "hello" || m.Messages[2].Content != "hi" || m.Messages[3].Content != "what time is it?" {
+		t.Errorf("conversation changed: %+v", m.Messages)
 	}
 }
 
 func TestInjectDynamicContext_NoLeadingSystem(t *testing.T) {
-	// No system prompt: the context becomes message 0.
+	// No system prompt: the context becomes a new leading system message.
 	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"time?"}]}`)
 	out, err := injectDynamicContext(body, "TIME-CTX")
 	if err != nil {
@@ -78,14 +74,22 @@ func TestInjectDynamicContext_NoLeadingSystem(t *testing.T) {
 	}
 }
 
-func TestInjectDynamicContext_NoUserMessage(t *testing.T) {
+func TestInjectDynamicContext_SystemOnlyMerges(t *testing.T) {
+	// A system-only body still merges into the one system message (harmless,
+	// and keeps a single leading system message).
 	body := []byte(`{"messages":[{"role":"system","content":"x"}]}`)
 	out, err := injectDynamicContext(body, "T")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if string(out) != string(body) {
-		t.Errorf("body changed when no user message present")
+	var m struct {
+		Messages []struct{ Role, Content string } `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(m.Messages) != 1 || m.Messages[0].Role != "system" || !strings.Contains(m.Messages[0].Content, "T") {
+		t.Errorf("expected merged single system message, got %+v", m.Messages)
 	}
 }
 

@@ -1103,17 +1103,15 @@ func dynamicContext(r *http.Request) string {
 		" (UTC). Treat this as the present moment when answering."
 }
 
-// injectDynamicContext inserts a dedicated system message carrying the
-// per-request context (the wall clock) at the END of the leading run of system
-// messages, i.e. right after the static system prompt and before the first
-// non-system turn.
+// injectDynamicContext folds the per-request context (the wall clock) into the
+// system prompt so the model treats it authoritatively.
 //
-// It must be a system message (a reasoning model disregards a context line
-// buried in a user turn and falls back to "I have no clock"), and it must sit at
-// the beginning: vLLM rejects a system message that appears after any
-// non-system message ("System message must be at the beginning"), so it cannot
-// go just before the last user turn on a multi-turn conversation. Keeping the
-// static system prompt as message 0 leaves it available as a cacheable prefix.
+// It MUST be carried by a system message (a reasoning model disregards a context
+// line buried in a user turn and falls back to "I have no clock"), and there
+// must be exactly ONE system message, first: vLLM/Qwen reject both a system
+// message after a non-system turn AND a second system message ("System message
+// must be at the beginning"). So we append the context to the existing leading
+// system message (or add one when absent) rather than inserting a separate one.
 // The exact string is recorded in the reproducibility metadata (DynamicContext)
 // for deterministic replay.
 //
@@ -1130,23 +1128,24 @@ func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if !ok || len(msgs) == 0 {
 		return body, nil
 	}
-	// Find the end of the leading run of system messages.
-	insertAt := 0
-	for insertAt < len(msgs) {
-		msg, ok := msgs[insertAt].(map[string]any)
-		if !ok || msg["role"] != "system" {
-			break
+	// Append to the first message when it is a system message.
+	if first, ok := msgs[0].(map[string]any); ok && first["role"] == "system" {
+		switch c := first["content"].(type) {
+		case string:
+			first["content"] = c + "\n\n" + ctx
+		case []any:
+			// Multimodal system content (array of parts): append a text part.
+			first["content"] = append(c, map[string]any{"type": "text", "text": "\n\n" + ctx})
+		case nil:
+			first["content"] = ctx
+		default:
+			return body, nil // unknown content shape; leave untouched
 		}
-		insertAt++
+		m["messages"] = msgs
+		return json.Marshal(m)
 	}
-	if insertAt >= len(msgs) {
-		return body, nil // only system messages: no turn to answer, nothing to do
-	}
-	sysMsg := map[string]any{"role": "system", "content": ctx}
-	msgs = append(msgs, nil)
-	copy(msgs[insertAt+1:], msgs[insertAt:])
-	msgs[insertAt] = sysMsg
-	m["messages"] = msgs
+	// No leading system message: prepend one.
+	m["messages"] = append([]any{map[string]any{"role": "system", "content": ctx}}, msgs...)
 	return json.Marshal(m)
 }
 

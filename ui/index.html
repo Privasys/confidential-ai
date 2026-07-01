@@ -161,8 +161,8 @@ async function sendMessage() {
     const text = textarea.value.trim();
     if (!text || sending) return;
 
-    if (!config.hostname) {
-        messages.push({ role: 'error', content: 'Not connected. The developer portal should pass the enclave hostname automatically.' });
+    if (!config.appId) {
+        messages.push({ role: 'error', content: 'Not connected. Open this from the developer portal.' });
         renderMessages();
         return;
     }
@@ -172,7 +172,7 @@ async function sendMessage() {
     renderMessages();
     textarea.value = '';
 
-    // Build the OpenAI-compatible request body
+    // Build the OpenAI-compatible message list.
     const apiMessages = messages
         .filter(m => m.role === 'user' || m.role === 'assistant')
         .map(m => ({ role: m.role, content: m.content }));
@@ -180,91 +180,46 @@ async function sendMessage() {
     setLoading(true);
 
     try {
-        // Call the enclave gateway directly (L4 TLS passthrough, supports SSE).
-        const url = `https://${config.hostname}/v1/chat/completions`;
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                messages: apiMessages,
-                stream: true,
-            }),
-        });
-
-        if (!res.ok) {
-            const errText = await res.text().catch(() => res.statusText);
-            throw new Error(`${res.status}: ${errText}`);
-        }
-
-        // Stream the response via SSE.
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let content = '';
-        let reproducibility = null;
-        let buffer = '';
-
-        messages.push({ role: 'assistant', content: '', reproducibility: null });
-        // Remove typing indicator since we show streamed text
+        // This demo runs in a sandboxed (null-origin) iframe, so it cannot call
+        // the enclave directly. Ask the parent developer portal — authenticated
+        // and same-origin to the API — to relay the chat through the management
+        // RPC proxy, and render the (non-streaming) reply.
+        const content = await requestChatViaParent(apiMessages);
         const typing = document.querySelector('.typing');
         if (typing) typing.remove();
+        messages.push({ role: 'assistant', content });
         renderMessages();
-        const msgDiv = chatMessages.lastElementChild;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const payload = line.slice(6).trim();
-                if (payload === '[DONE]') continue;
-
-                try {
-                    const chunk = JSON.parse(payload);
-                    const delta = chunk.choices?.[0]?.delta?.content;
-                    if (delta) {
-                        content += delta;
-                        messages[messages.length - 1].content = content;
-                        msgDiv.childNodes[0].textContent = content;
-                        scrollToBottom();
-                    }
-                    if (chunk.reproducibility) {
-                        reproducibility = chunk.reproducibility;
-                    }
-                } catch {}
-            }
-        }
-
-        // Update final message with reproducibility metadata.
-        const lastMsg = messages[messages.length - 1];
-        lastMsg.content = content;
-        lastMsg.reproducibility = reproducibility;
-
-        // Re-render the last message to include metadata badges.
-        if (msgDiv && reproducibility) {
-            const existing = msgDiv.querySelector('.meta');
-            if (!existing) {
-                const meta = document.createElement('div');
-                meta.className = 'meta';
-                if (reproducibility.model) meta.innerHTML += `<span>model: ${esc(reproducibility.model)}</span>`;
-                if (reproducibility.seed !== undefined) meta.innerHTML += `<span>seed: ${esc(String(reproducibility.seed))}</span>`;
-                if (reproducibility.tee_type) meta.innerHTML += `<span>TEE: ${esc(reproducibility.tee_type)}</span>`;
-                if (reproducibility.gpu) meta.innerHTML += `<span>GPU: ${esc(reproducibility.gpu)}</span>`;
-                if (reproducibility.vllm_version) meta.innerHTML += `<span>vLLM: ${esc(reproducibility.vllm_version)}</span>`;
-                msgDiv.appendChild(meta);
-            }
-        }
     } catch (err) {
+        const typing = document.querySelector('.typing');
+        if (typing) typing.remove();
         messages.push({ role: 'error', content: err.message || 'Request failed' });
         renderMessages();
     } finally {
         setLoading(false);
         textarea.focus();
     }
+}
+
+// Relay one chat turn through the parent portal via postMessage. Resolves with
+// the assistant text or rejects on error/timeout.
+function requestChatViaParent(apiMessages) {
+    return new Promise((resolve, reject) => {
+        const id = Math.random().toString(36).slice(2);
+        const timer = setTimeout(() => {
+            window.removeEventListener('message', onResp);
+            reject(new Error('Timed out waiting for the portal.'));
+        }, 180000);
+        function onResp(e) {
+            const d = e.data;
+            if (!d || d.type !== 'privasys-chat-response' || d.id !== id) return;
+            clearTimeout(timer);
+            window.removeEventListener('message', onResp);
+            if (d.error) reject(new Error(d.error));
+            else resolve(d.content || '');
+        }
+        window.addEventListener('message', onResp);
+        parent.postMessage({ type: 'privasys-chat', id, messages: apiMessages }, '*');
+    });
 }
 
 function resetChat() {

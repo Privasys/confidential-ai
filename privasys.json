@@ -123,10 +123,10 @@
       "properties": {
         "model": {
           "type": "string",
-          "description": "Local directory (e.g. qwen36-35b-a3b-fp8) or a HuggingFace repo (e.g. Qwen/Qwen3.6-35B-A3B-FP8).",
+          "description": "The model this instance serves. The list is the models available on this instance.",
           "x-privasys": {
             "label": "Model",
-            "placeholder": "Qwen/Qwen3.6-35B-A3B-FP8"
+            "source": { "tool": "model_status", "select": "available" }
           }
         },
         "dtype": {

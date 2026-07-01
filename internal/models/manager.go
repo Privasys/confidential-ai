@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -118,6 +119,98 @@ type LoadRequest struct {
 	// deployments — capturing graphs for batch sizes the scheduler
 	// will never admit only burns VRAM. 0 means vLLM default.
 	MaxCudagraphCaptureSize int `json:"max_cudagraph_capture_size,omitempty"`
+}
+
+// UnmarshalJSON accepts the numeric fields as either JSON numbers OR numeric
+// strings. The portal's generic Configure form (image-bound typed config)
+// submits every field as a string ("4", "262144", "0.93"), so a plain int/float
+// field would reject it with "cannot unmarshal string into Go struct field".
+// Direct API/CLI callers keep sending real numbers; both now work.
+func (r *LoadRequest) UnmarshalJSON(data []byte) error {
+	type alias LoadRequest // avoid recursing into this method
+	aux := struct {
+		MaxModelLen             json.RawMessage `json:"max_model_len,omitempty"`
+		GPUMemoryUtilization    json.RawMessage `json:"gpu_memory_utilization,omitempty"`
+		MaxNumSeqs              json.RawMessage `json:"max_num_seqs,omitempty"`
+		MaxCudagraphCaptureSize json.RawMessage `json:"max_cudagraph_capture_size,omitempty"`
+		*alias
+	}{alias: (*alias)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if v, ok, err := flexInt(aux.MaxModelLen); err != nil {
+		return fmt.Errorf("max_model_len: %w", err)
+	} else if ok {
+		r.MaxModelLen = v
+	}
+	if v, ok, err := flexInt(aux.MaxNumSeqs); err != nil {
+		return fmt.Errorf("max_num_seqs: %w", err)
+	} else if ok {
+		r.MaxNumSeqs = v
+	}
+	if v, ok, err := flexInt(aux.MaxCudagraphCaptureSize); err != nil {
+		return fmt.Errorf("max_cudagraph_capture_size: %w", err)
+	} else if ok {
+		r.MaxCudagraphCaptureSize = v
+	}
+	if v, ok, err := flexFloat(aux.GPUMemoryUtilization); err != nil {
+		return fmt.Errorf("gpu_memory_utilization: %w", err)
+	} else if ok {
+		r.GPUMemoryUtilization = v
+	}
+	return nil
+}
+
+// flexInt parses a JSON int or numeric string (also tolerating "4.0"). ok is
+// false when the value is absent/null/empty, leaving the field at its default.
+func flexInt(raw json.RawMessage) (int, bool, error) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return 0, false, nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(raw, &str); err != nil {
+			return 0, false, err
+		}
+		str = strings.TrimSpace(str)
+		if str == "" {
+			return 0, false, nil
+		}
+		s = str
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		return v, true, nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false, err
+	}
+	return int(f), true, nil
+}
+
+// flexFloat parses a JSON number or numeric string. ok is false when absent.
+func flexFloat(raw json.RawMessage) (float64, bool, error) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return 0, false, nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(raw, &str); err != nil {
+			return 0, false, err
+		}
+		str = strings.TrimSpace(str)
+		if str == "" {
+			return 0, false, nil
+		}
+		s = str
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false, err
+	}
+	return f, true, nil
 }
 
 // Status is the response for GET /v1/models/status.

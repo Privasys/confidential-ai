@@ -17,7 +17,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -tags ratls -trimpath -ldflags='-s -w' -o /confidential-ai ./cmd/server/
+# COMMIT_SHA / BUILD_VERSION stamp the binary's build provenance (exposed
+# on /healthz). Passed by CI (build.yml); empty on local builds.
+ARG COMMIT_SHA=
+ARG BUILD_VERSION=
+RUN CGO_ENABLED=0 go build -tags ratls -trimpath -ldflags="-s -w -X github.com/privasys/confidential-ai/internal/handler.BuildCommit=${COMMIT_SHA} -X github.com/privasys/confidential-ai/internal/handler.BuildVersion=${BUILD_VERSION}" -o /confidential-ai ./cmd/server/
 
 # ---
 

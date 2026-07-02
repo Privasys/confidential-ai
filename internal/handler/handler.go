@@ -25,6 +25,16 @@ import (
 	"github.com/privasys/confidential-ai/internal/reproducibility"
 )
 
+// BuildCommit and BuildVersion identify this build. Stamped at image
+// build time via -ldflags "-X ..." (see Dockerfile.prod); empty on
+// unstamped dev builds. Exposed on /healthz so clients (e.g. the chat
+// front-end's build-info footer) can show and link the exact backend
+// commit alongside their own.
+var (
+	BuildCommit  string
+	BuildVersion string
+)
+
 // Handler is the HTTP handler that proxies to vLLM and injects
 // reproducibility metadata into every response.
 type Handler struct {
@@ -956,7 +966,7 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 		modelState = "loading"
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"status":       "ok",
 		"model_state":  modelState,
 		"model":        modelName,
@@ -966,7 +976,16 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 		"tee":          h.cfg.TeeType,
 		"vllm_version": h.cfg.VLLMVersion,
 		"image_digest": h.cfg.ImageDigest,
-	})
+	}
+	// Build provenance (stamped via -ldflags at image build; absent on
+	// unstamped dev builds). Lets clients display + link the backend commit.
+	if BuildCommit != "" {
+		body["commit"] = BuildCommit
+	}
+	if BuildVersion != "" {
+		body["version"] = BuildVersion
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 // readiness returns 200 when a model is loaded and serving, 503 otherwise.

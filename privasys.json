@@ -116,7 +116,7 @@
     "name": "load_model",
     "readiness_path": "/readiness",
     "status_path": "/v1/models/status",
-    "title": "Model",
+    "title": "Model & vLLM settings",
     "description": "Load the model this instance serves. Inference stays unavailable until a model is loaded; a large model can take several minutes to load (follow progress with the model_status action).",
     "inputSchema": {
       "type": "object",

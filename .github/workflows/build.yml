@@ -94,5 +94,7 @@ jobs:
           file: Dockerfile.prod
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.name }}:latest
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
           labels: |
             org.privasys.manifest=${{ steps.manifest.outputs.json }}

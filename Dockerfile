@@ -17,6 +17,9 @@ ARG RA_TLS_CLIENTS_REF=8a0318d2641ff4e4ce7e8cbaa8391b04fdbb48c9
 RUN curl -sL "https://github.com/Privasys/go/releases/download/${GO_RATLS_VERSION}/go-ratls-${GO_RATLS_VERSION}-linux-amd64.tar.gz"       -o /tmp/go-ratls.tar.gz  && tar -C /usr/local -xzf /tmp/go-ratls.tar.gz  && rm /tmp/go-ratls.tar.gz  && git clone https://github.com/Privasys/ra-tls-clients /ra-tls-clients  && git -C /ra-tls-clients checkout "${RA_TLS_CLIENTS_REF}"
 ENV GOROOT=/usr/local/go-ratls
 ENV PATH=/usr/local/go-ratls/bin:${PATH}
+# The fork's release tarball ships a hermetic go.env (GOPROXY with no
+# usable entries); restore standard module resolution explicitly.
+ENV GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org GOTOOLCHAIN=local
 
 WORKDIR /src
 COPY go.mod go.sum ./

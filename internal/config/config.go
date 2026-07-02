@@ -82,6 +82,15 @@ type Config struct {
 	// existing access before API keys are issued). env: INFERENCE_AUTH_REQUIRED.
 	InferenceAuthRequired bool
 
+	// MCPRATLS routes the agent loop's MCP calls (tool discovery + tool
+	// invocations, transport privasys_http) over per-request attested
+	// RA-TLS connections to the tool enclaves instead of gateway-terminated
+	// HTTPS. The enclave gateways refuse plaintext app traffic on the
+	// terminated leg (sealed-transport-required), so this is REQUIRED for
+	// tools to work on the platform; disable only for local dev against
+	// plain-HTTP MCP servers. Default true. env: MCP_RATLS.
+	MCPRATLS bool
+
 	// MCPServers, when non-empty, enables the agentic tool-call loop
 	// on POST /v1/chat/completions. Format (env MCP_SERVERS):
 	//
@@ -232,6 +241,8 @@ func Parse(args []string) (*Config, error) {
 		"Revoked-sid poll cadence (env: REVOKED_SIDS_INTERVAL)")
 	fs.BoolVar(&cfg.InferenceAuthRequired, "inference-auth-required", envBool("INFERENCE_AUTH_REQUIRED", false),
 		"Reject unauthenticated inference with 401; when false, callers are still attributed for metering when a token is present (env: INFERENCE_AUTH_REQUIRED)")
+	fs.BoolVar(&cfg.MCPRATLS, "mcp-ratls", envBool("MCP_RATLS", true),
+		"Carry MCP tool calls over per-request attested RA-TLS to the tool enclaves; disable only for local dev against plain-HTTP servers (env: MCP_RATLS)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
 	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),

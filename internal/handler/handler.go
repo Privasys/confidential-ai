@@ -124,10 +124,21 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 		// the fleet's tool set changes. It is likewise created when only
 		// per-request tool grants are enabled, so the agentic path is
 		// reachable for fleets whose tools are all user-supplied.
-		h.agentCatalog = agent.NewCatalog(servers, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
-		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, &http.Client{Timeout: 60 * time.Second})
+		// MCP transport: attested RA-TLS by default — the enclave gateways
+		// refuse plaintext app traffic on the terminated leg
+		// (sealed-transport-required), and tool arguments/results are user
+		// data. MCP_RATLS=0 falls back to plain HTTP for local dev.
+		catClient := &http.Client{Timeout: 15 * time.Second}
+		dispClient := &http.Client{Timeout: 60 * time.Second}
+		if cfg.MCPRATLS {
+			rt := agent.NewRATLSTransport()
+			catClient.Transport = rt
+			dispClient.Transport = rt
+		}
+		h.agentCatalog = agent.NewCatalog(servers, catClient, 60*time.Second)
+		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, dispClient)
 		h.agentConsent = agent.NewConsentRegistry()
-		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "")
+		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v, ratls=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "", cfg.MCPRATLS)
 	}
 	if cfg.ToolGrantJWKSURL != "" {
 		// Startup env path (kept for parity / non-fleet deployments). The

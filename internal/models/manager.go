@@ -156,6 +156,12 @@ type Manager struct {
 	loadErr      string
 	cmd          *exec.Cmd
 	cancel       context.CancelFunc
+
+	// appliedReq is the effective (defaults-applied) LoadRequest of the
+	// load currently serving or in flight. Load compares against it so a
+	// re-delivered identical configuration stays a no-op while a changed
+	// parameter set triggers a reload.
+	appliedReq LoadRequest
 }
 
 // NewManager creates a new model manager. stateFile may be empty to
@@ -228,32 +234,16 @@ func (m *Manager) Quantization() string {
 }
 
 // Load starts loading a model. Returns an error if already loading.
-// Idempotent: if the requested model is already loaded, returns nil.
+// Idempotent on the FULL effective request: re-delivering the identical
+// configuration (e.g. the orchestrator re-configuring after a restart)
+// is a no-op, but a same-model request with different parameters
+// triggers a reload — matching by model name alone silently discarded
+// parameter changes (applying max_model_len=262144 over a running 8192
+// instance did nothing, and tool-augmented prompts then blew the stale
+// context window).
 func (m *Manager) Load(req LoadRequest) error {
-	m.mu.Lock()
-
-	// Idempotent: already loaded same model.
-	if m.state == StateReady && m.model == req.Model {
-		m.mu.Unlock()
-		return nil
-	}
-
-	// Already loading.
-	if m.state == StateLoading {
-		m.mu.Unlock()
-		return fmt.Errorf("already loading model %q", m.model)
-	}
-
-	// If a different model is loaded, unload first.
-	if m.state == StateReady && m.model != req.Model {
-		m.mu.Unlock()
-		if err := m.Unload(); err != nil {
-			return fmt.Errorf("unload current model: %w", err)
-		}
-		m.mu.Lock()
-	}
-
-	// Apply defaults.
+	// Apply defaults FIRST so idempotency compares effective requests,
+	// not wire requests.
 	if req.Dtype == "" {
 		req.Dtype = "auto"
 	}
@@ -274,9 +264,34 @@ func (m *Manager) Load(req LoadRequest) error {
 		req.MaxNumSeqs = 256
 	}
 
+	m.mu.Lock()
+
+	// Idempotent: the identical effective configuration is already serving.
+	if m.state == StateReady && req == m.appliedReq {
+		m.mu.Unlock()
+		return nil
+	}
+
+	// Already loading.
+	if m.state == StateLoading {
+		m.mu.Unlock()
+		return fmt.Errorf("already loading model %q", m.model)
+	}
+
+	// A model is serving with a different configuration (other model OR
+	// other parameters): unload it, then load the new request.
+	if m.state == StateReady {
+		m.mu.Unlock()
+		if err := m.Unload(); err != nil {
+			return fmt.Errorf("unload current model: %w", err)
+		}
+		m.mu.Lock()
+	}
+
 	m.state = StateLoading
 	m.model = req.Model
 	m.quantization = req.Quantization
+	m.appliedReq = req
 	m.modelDigest = ""
 	m.progress = 0
 	m.message = "Starting vLLM..."

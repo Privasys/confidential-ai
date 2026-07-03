@@ -87,21 +87,25 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 				log.Printf("[agent] tool-grant rejected: %v", gerr)
 			} else if len(gservers) > 0 {
 				merged := agent.MergeServers(h.agentCatalog.Servers(), gservers)
-				// Reuse the admin catalogue's clients (attested RA-TLS
-				// transport): granted tools live in enclaves behind the
-				// gateway's terminated leg, which refuses plain HTTP
-				// (sealed-transport-required) — with a plain client every
-				// granted tool silently vanished from the union.
-				catClient := h.agentCatClient
-				if catClient == nil {
-					catClient = &http.Client{Timeout: 10 * time.Second}
+				// Route transport per tool kind. Enclave tools (grant
+				// carries their workload digest) MUST use the admin
+				// catalogue's attested RA-TLS transport — the gateway's
+				// terminated leg refuses plain HTTP
+				// (sealed-transport-required); with a plain client every
+				// granted enclave tool silently vanished from the union.
+				// External tools (no digest) go over WebPKI TLS with an
+				// SSRF-guarded dialer instead — RA-TLS would refuse them,
+				// and their URL is user input reaching out from inside
+				// the enclave. Admin (fleet) servers carry no digest but
+				// only external GRANT servers are registered on the
+				// external path, so fleet tools stay attested.
+				var enclaveRT http.RoundTripper
+				if h.agentCatClient != nil {
+					enclaveRT = h.agentCatClient.Transport
 				}
-				dispClient := h.agentDispClient
-				if dispClient == nil {
-					dispClient = &http.Client{Timeout: 60 * time.Second}
-				}
-				cat = agent.NewCatalog(merged, catClient, 60*time.Second)
-				disp = agent.NewDispatcher(cat, dispClient)
+				router := agent.NewKindRouter(enclaveRT, agent.ExternalHostsOf(gservers))
+				cat = agent.NewCatalog(merged, &http.Client{Timeout: 15 * time.Second, Transport: router}, 60*time.Second)
+				disp = agent.NewDispatcher(cat, &http.Client{Timeout: 60 * time.Second, Transport: router})
 				defer cat.Close()
 			}
 		}

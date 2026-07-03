@@ -68,6 +68,9 @@ func (v *GrantVerifier) GrantServers(ctx context.Context, token string) ([]Serve
 			AuthAudience:             t.AuthAudience,
 			AuthScopes:               t.AuthScopes,
 			RequiresUserConfirmation: t.RequiresUserConfirmation,
+			// Routes the server's transport: digest present = enclave tool
+			// (attested RA-TLS), absent = external (WebPKI + SSRF guard).
+			ExpectedDigest: t.ExpectedDigest,
 		})
 	}
 	return out, nil

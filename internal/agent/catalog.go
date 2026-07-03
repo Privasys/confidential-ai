@@ -94,6 +94,13 @@ type Server struct {
 	// per-tool flag comes from the catalogue; this is the per-server
 	// default when the tool descriptor omits it.
 	RequiresUserConfirmation bool
+
+	// ExpectedDigest is the attested workload digest (OID 3.2 value, bare
+	// hex) of the tool's enclave, carried by the tool-grant for enclave
+	// tools. Empty for EXTERNAL (off-platform) tools — its absence is what
+	// routes the server onto the WebPKI+SSRF-guarded transport instead of
+	// attested RA-TLS (see KindRouter).
+	ExpectedDigest string
 }
 
 // effectiveAuthMode normalises AuthMode + the legacy BearerForward flag.

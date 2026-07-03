@@ -48,6 +48,14 @@ type Handler struct {
 	agentCatalog    *agent.Catalog
 	agentDispatcher *agent.Dispatcher
 	agentConsent    *agent.ConsentRegistry
+	// agentCatClient / agentDispClient are the HTTP clients the admin
+	// catalogue and dispatcher were built with (attested RA-TLS transport
+	// unless MCP_RATLS=0). The per-request grant-union path MUST reuse
+	// them: a plain http.Client hits the gateway's terminated leg and the
+	// tool's enclave refuses it (sealed-transport-required), silently
+	// dropping every granted tool from the ephemeral catalogue.
+	agentCatClient  *http.Client
+	agentDispClient *http.Client
 
 	// grantVerifier verifies the per-request X-Privasys-Tool-Grant header so
 	// a user's own tools can be unioned with the configured catalogue for
@@ -148,6 +156,8 @@ func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
 		h.agentCatalog = agent.NewCatalog(servers, catClient, 60*time.Second)
 		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, dispClient)
 		h.agentConsent = agent.NewConsentRegistry()
+		h.agentCatClient = catClient
+		h.agentDispClient = dispClient
 		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v, ratls=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "", cfg.MCPRATLS)
 	}
 	if cfg.ToolGrantJWKSURL != "" {

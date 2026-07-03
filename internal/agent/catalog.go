@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -236,6 +237,10 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 	for _, s := range c.servers {
 		tools, err := c.fetchTools(ctx, s)
 		if err != nil {
+			// Loud per-server: a failing server otherwise just vanishes
+			// from the model's tool list ("I don't have that tool") with
+			// nothing in the logs when the other servers are healthy.
+			log.Printf("[agent] tool fetch failed for %q (%s): %v", s.Name, s.BaseURL, err)
 			errs = append(errs, fmt.Sprintf("%s: %v", s.Name, err))
 			continue
 		}

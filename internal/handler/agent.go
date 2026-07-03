@@ -87,8 +87,21 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 				log.Printf("[agent] tool-grant rejected: %v", gerr)
 			} else if len(gservers) > 0 {
 				merged := agent.MergeServers(h.agentCatalog.Servers(), gservers)
-				cat = agent.NewCatalog(merged, &http.Client{Timeout: 10 * time.Second}, 60*time.Second)
-				disp = agent.NewDispatcher(cat, &http.Client{Timeout: 60 * time.Second})
+				// Reuse the admin catalogue's clients (attested RA-TLS
+				// transport): granted tools live in enclaves behind the
+				// gateway's terminated leg, which refuses plain HTTP
+				// (sealed-transport-required) — with a plain client every
+				// granted tool silently vanished from the union.
+				catClient := h.agentCatClient
+				if catClient == nil {
+					catClient = &http.Client{Timeout: 10 * time.Second}
+				}
+				dispClient := h.agentDispClient
+				if dispClient == nil {
+					dispClient = &http.Client{Timeout: 60 * time.Second}
+				}
+				cat = agent.NewCatalog(merged, catClient, 60*time.Second)
+				disp = agent.NewDispatcher(cat, dispClient)
 				defer cat.Close()
 			}
 		}

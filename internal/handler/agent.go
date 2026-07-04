@@ -103,6 +103,9 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 				if h.agentCatClient != nil {
 					enclaveRT = h.agentCatClient.Transport
 				}
+				// Pin each granted enclave tool to the workload digest the
+				// user admitted (fails closed if the app changed since).
+				enclaveRT = agent.PinnedEnclaveTransport(enclaveRT, gservers)
 				router := agent.NewKindRouter(enclaveRT, agent.ExternalHostsOf(gservers))
 				cat = agent.NewCatalog(merged, &http.Client{Timeout: 15 * time.Second, Transport: router}, 60*time.Second)
 				disp = agent.NewDispatcher(cat, &http.Client{Timeout: 60 * time.Second, Transport: router})

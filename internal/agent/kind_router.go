@@ -83,6 +83,42 @@ func ExternalHostsOf(servers []Server) []string {
 	return hosts
 }
 
+// PinnedEnclaveTransport returns `base` upgraded with per-host workload
+// digest pinning for every server that carries an ExpectedDigest: after
+// the peer attests, its leaf's workload code hash (OID 3.2) must equal
+// the digest the user admitted, or the request fails closed. When `base`
+// is not the RA-TLS transport (local dev fallback) it is returned
+// unchanged — pinning without attestation would be theatre.
+func PinnedEnclaveTransport(base http.RoundTripper, servers []Server) http.RoundTripper {
+	rt, ok := base.(*RATLSTransport)
+	if !ok || rt == nil {
+		return base
+	}
+	digests := map[string]string{}
+	for _, s := range servers {
+		if s.ExpectedDigest == "" {
+			continue
+		}
+		if u, err := url.Parse(s.BaseURL); err == nil && u.Hostname() != "" {
+			digests[strings.ToLower(u.Hostname())] = strings.ToLower(s.ExpectedDigest)
+		}
+	}
+	if len(digests) == 0 {
+		return base
+	}
+	pinned := *rt // shallow copy: per-request dialing, no shared conn state
+	// Merge over any digests the base already pins (per-request map).
+	merged := make(map[string]string, len(rt.ExpectedDigests)+len(digests))
+	for k, v := range rt.ExpectedDigests {
+		merged[k] = v
+	}
+	for k, v := range digests {
+		merged[k] = v
+	}
+	pinned.ExpectedDigests = merged
+	return &pinned
+}
+
 // newExternalTransport returns a WebPKI TLS transport whose dialer
 // resolves the target and refuses non-public addresses, dialling the
 // vetted IP directly so a DNS rebind between check and connect cannot

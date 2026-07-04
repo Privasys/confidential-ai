@@ -42,6 +42,15 @@ type RATLSTransport struct {
 	// Plain serves non-HTTPS requests (local dev). Defaults to
 	// http.DefaultTransport.
 	Plain http.RoundTripper
+	// ExpectedDigests optionally pins the workload the peer must be
+	// running, keyed by lowercase hostname: after the attestation
+	// verifies, the peer leaf's workload code hash (OID
+	// 1.3.6.1.4.1.65230.3.2) must equal the pinned bare-hex digest or the
+	// request is refused. This is what makes a granted tool's
+	// expected_digest an enforced promise, not just UI copy: a tool
+	// enclave that was redeployed with different code since the user
+	// admitted it fails closed. Hosts without an entry are not pinned.
+	ExpectedDigests map[string]string
 }
 
 // NewRATLSTransport returns a RoundTripper with sane defaults.
@@ -103,6 +112,24 @@ func (t *RATLSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("ratls: %s attestation failed — refusing to send tool data: %w", host, verr)
 	}
 
+	// Per-host workload pinning: the attested leaf must carry the exact
+	// workload code hash the caller admitted (OID 3.2).
+	if want := t.ExpectedDigests[strings.ToLower(host)]; want != "" {
+		got := ""
+		for _, ext := range info.CustomOids {
+			if ext.OID == rc.OidWorkloadCodeHash {
+				got = strings.ToLower(fmt.Sprintf("%x", ext.Value))
+				break
+			}
+		}
+		if !strings.EqualFold(got, want) {
+			cli.Close()
+			return nil, fmt.Errorf(
+				"ratls: %s workload digest mismatch — enclave runs %s but the tool was admitted at %s; refusing to send tool data (the app changed since it was added)",
+				host, orUnset(got), want)
+		}
+	}
+
 	var body []byte
 	if req.Body != nil {
 		body, err = io.ReadAll(req.Body)
@@ -134,6 +161,14 @@ func (b *connBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cli.Close()
 	return err
+}
+
+// orUnset renders an empty digest readably in refusal messages.
+func orUnset(v string) string {
+	if v == "" {
+		return "(no workload digest)"
+	}
+	return v
 }
 
 // teeFromOID maps a quote-extension OID to the TEE type the verification

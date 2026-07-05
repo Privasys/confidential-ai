@@ -130,7 +130,7 @@ func TestDispatcher_ErrorPaths(t *testing.T) {
 		expect string
 	}{
 		"unknown_server": {"other__search", "unknown MCP server"},
-		"malformed":      {"plain", "malformed tool name"},
+		"malformed":      {"plain", "unknown tool name"},
 		"upstream_500":   {"rag__search", "status 500"},
 	}
 	for name, tc := range cases {

@@ -124,7 +124,21 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	// Only a real Bearer credential may flow to tools. On the sealed
+	// transport the Authorization header carries the session relay's OWN
+	// scheme ("PrivasysSession <id>") — TrimPrefix left that whole string
+	// as the "bearer", so every tool call forwarded
+	// "Bearer PrivasysSession …" and the tool's OIDC layer refused it
+	// ("invalid or expired token") even for public functions. No bearer →
+	// no Authorization header on the tool call: public tool functions
+	// work; authed ones correctly refuse the anonymous caller.
+	// TODO(ai-tools): propagate the sealed caller's identity to tools
+	// (IdP exchange keyed on the relay-asserted sub) so authed tool
+	// functions work from the chat too.
+	bearer := ""
+	if v := r.Header.Get("Authorization"); strings.HasPrefix(v, "Bearer ") {
+		bearer = strings.TrimPrefix(v, "Bearer ")
+	}
 	wantStream := reqParams.Stream
 
 	// Set up the SSE stream early when the client wants one, so events

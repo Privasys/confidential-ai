@@ -40,7 +40,19 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 
 	server, tool, ok := SplitQualifiedName(qualifiedName)
 	if !ok {
-		return errResult(qualifiedName, "malformed tool name (expected <server>__<tool>)", started)
+		// The model frequently calls a tool by its FRIENDLY name — the
+		// grant's server name ("kv_store") or the tool's bare name,
+		// often with underscores where the tool uses dashes — especially
+		// on the text-rescue path. Refusing outright surfaced as opaque
+		// tool failures in the chat; resolve unambiguous bare names
+		// instead and only error when the reference is genuinely
+		// ambiguous or unknown.
+		if q, rok := d.resolveBareName(ctx, qualifiedName); rok {
+			server, tool, _ = SplitQualifiedName(q)
+			qualifiedName = q
+		} else {
+			return errResult(qualifiedName, "unknown tool name (expected <server>__<tool>)", started)
+		}
 	}
 	srv, ok := d.catalog.Server(server)
 	if !ok {
@@ -86,6 +98,42 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 		Result:     respBody,
 		DurationMs: time.Since(started).Milliseconds(),
 	}
+}
+
+// resolveBareName maps an unqualified tool reference to a unique
+// "<server>__<tool>" name. Resolution ladder:
+//  1. a unique exact tool-name match across the catalogue;
+//  2. a unique match after underscore/dash normalisation (models write
+//     kv_store for a tool named kv-store);
+//  3. a server whose catalogue has exactly one tool.
+//
+// Anything ambiguous resolves to false — silently picking one of several
+// candidates would run a tool the model did not intend.
+func (d *Dispatcher) resolveBareName(ctx context.Context, name string) (string, bool) {
+	tools, _ := d.catalog.Tools(ctx)
+	norm := func(s string) string { return strings.ReplaceAll(s, "_", "-") }
+
+	var exact, fuzzy, srvTools []Tool
+	for _, t := range tools {
+		if t.Name == name {
+			exact = append(exact, t)
+		}
+		if norm(t.Name) == norm(name) {
+			fuzzy = append(fuzzy, t)
+		}
+		if t.Server == name {
+			srvTools = append(srvTools, t)
+		}
+	}
+	switch {
+	case len(exact) == 1:
+		return exact[0].QualifiedName(), true
+	case len(fuzzy) == 1:
+		return fuzzy[0].QualifiedName(), true
+	case len(srvTools) == 1:
+		return srvTools[0].QualifiedName(), true
+	}
+	return "", false
 }
 
 // authHeader resolves the Authorization header value for an outbound

@@ -8,9 +8,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/privasys/confidential-ai/internal/config"
 )
+
+// authInference wires a test OIDC verifier onto h and returns a valid end-user
+// token to present as X-App-Auth. Inference authentication is mandatory, so
+// every inference test must authenticate its caller. Safe to call after
+// RegisterRoutes (route handlers read h.oidcVerifier live).
+func authInference(t *testing.T, h *Handler) string {
+	t.Helper()
+	issuer, mint := jwksTestIDP(t)
+	h.oidcVerifier = NewOIDCVerifier(issuer, "")
+	return mint(map[string]any{"iss": issuer, "sub": "test-user", "exp": float64(time.Now().Add(time.Hour).Unix())})
+}
 
 func TestHealthEndpoint(t *testing.T) {
 	h := New(&config.Config{
@@ -90,6 +102,7 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Privasys-Reproducibility", "1")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -108,13 +121,13 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 	}
 
 	checks := map[string]any{
-		"model":          "gpt-oss-120b",
-		"quantization":   "awq",
-		"gpu":            "H100-80GB",
-		"tee_type":       "tdx",
-		"vllm_version":   "0.19.1",
-		"cuda_version":   "12.6",
-		"image_digest":   "sha256:abc123",
+		"model":        "gpt-oss-120b",
+		"quantization": "awq",
+		"gpu":          "H100-80GB",
+		"tee_type":     "tdx",
+		"vllm_version": "0.19.1",
+		"cuda_version": "12.6",
+		"image_digest": "sha256:abc123",
 	}
 	for k, want := range checks {
 		if got := repro[k]; got != want {
@@ -183,6 +196,7 @@ func TestCompletionsEndpoint(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Privasys-Reproducibility", "1")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -222,6 +236,7 @@ func TestVLLMUpstreamError(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -287,6 +302,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Privasys-Reproducibility", "1")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -361,6 +377,7 @@ func TestStreamingErrorPassthrough(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"hi"}],"stream":true}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -370,57 +387,57 @@ func TestStreamingErrorPassthrough(t *testing.T) {
 }
 
 func TestModelsLoadRequiresLoadToken(t *testing.T) {
-h := New(&config.Config{LoadToken: "s3cret"}, nil)
-mux := http.NewServeMux()
-h.RegisterRoutes(mux)
+	h := New(&config.Config{LoadToken: "s3cret"}, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
 
-cases := []struct {
-name       string
-authz      string
-wantStatus int
-}{
-{"no header", "", http.StatusUnauthorized},
-{"wrong scheme", "Basic abc", http.StatusUnauthorized},
-{"wrong token", "Bearer nope", http.StatusUnauthorized},
-// Correct token reaches the handler; modelMgr is nil so it
-// short-circuits with 501 NotImplemented. That is fine for
-// the auth-gate test - it proves the gate let the request
-// through.
-{"right token", "Bearer s3cret", http.StatusNotImplemented},
-}
+	cases := []struct {
+		name       string
+		authz      string
+		wantStatus int
+	}{
+		{"no header", "", http.StatusUnauthorized},
+		{"wrong scheme", "Basic abc", http.StatusUnauthorized},
+		{"wrong token", "Bearer nope", http.StatusUnauthorized},
+		// Correct token reaches the handler; modelMgr is nil so it
+		// short-circuits with 501 NotImplemented. That is fine for
+		// the auth-gate test - it proves the gate let the request
+		// through.
+		{"right token", "Bearer s3cret", http.StatusNotImplemented},
+	}
 
-for _, tc := range cases {
-t.Run(tc.name, func(t *testing.T) {
-req := httptest.NewRequest("POST", "/v1/models/load",
-strings.NewReader(`{"model":"gemma4"}`))
-if tc.authz != "" {
-req.Header.Set("Authorization", tc.authz)
-}
-rec := httptest.NewRecorder()
-mux.ServeHTTP(rec, req)
-if rec.Code != tc.wantStatus {
-t.Fatalf("got %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
-}
-})
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/v1/models/load",
+				strings.NewReader(`{"model":"gemma4"}`))
+			if tc.authz != "" {
+				req.Header.Set("Authorization", tc.authz)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("got %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
 }
 
 func TestModelsLoadOpenWhenNoLoadToken(t *testing.T) {
-// Empty LoadToken -> auth bypassed (legacy/dev mode).
-h := New(&config.Config{LoadToken: ""}, nil)
-mux := http.NewServeMux()
-h.RegisterRoutes(mux)
+	// Empty LoadToken -> auth bypassed (legacy/dev mode).
+	h := New(&config.Config{LoadToken: ""}, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
 
-req := httptest.NewRequest("POST", "/v1/models/load",
-strings.NewReader(`{"model":"gemma4"}`))
-rec := httptest.NewRecorder()
-mux.ServeHTTP(rec, req)
+	req := httptest.NewRequest("POST", "/v1/models/load",
+		strings.NewReader(`{"model":"gemma4"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
 
-// modelMgr is nil so we expect 501; the important assertion is
-// that we did NOT get 401.
-if rec.Code == http.StatusUnauthorized {
-t.Fatalf("expected auth bypassed, got 401: %s", rec.Body.String())
-}
+	// modelMgr is nil so we expect 501; the important assertion is
+	// that we did NOT get 401.
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("expected auth bypassed, got 401: %s", rec.Body.String())
+	}
 }
 
 func TestHasClientTools(t *testing.T) {
@@ -462,6 +479,7 @@ func TestChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	// no X-Privasys-Reproducibility header => OpenAI-shape pass-through
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -498,6 +516,7 @@ func TestStreamingChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T)
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-App-Auth", authInference(t, h))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

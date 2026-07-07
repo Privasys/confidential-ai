@@ -72,16 +72,6 @@ type Config struct {
 	// env: REVOKED_SIDS_INTERVAL.
 	RevokedSidsInterval time.Duration
 
-	// InferenceAuthRequired, when true, rejects unauthenticated inference
-	// (POST /v1/chat/completions, /v1/completions) with 401. The caller is
-	// identified from the end-user JWT in X-App-Auth (proxied path) or
-	// Authorization: Bearer (direct OpenAI clients), verified against
-	// OIDCIssuer. When false (default) the caller is still resolved and
-	// attributed for metering when a valid token is present, but anonymous
-	// requests are allowed (so enabling per-caller billing does not break
-	// existing access before API keys are issued). env: INFERENCE_AUTH_REQUIRED.
-	InferenceAuthRequired bool
-
 	// MCPRATLS routes the agent loop's MCP calls (tool discovery + tool
 	// invocations, transport privasys_http) over per-request attested
 	// RA-TLS connections to the tool enclaves instead of gateway-terminated
@@ -230,7 +220,7 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
 		"Legacy fallback bearer accepted on /v1/models/{load,unload} alongside the OIDC manager role (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.OIDCIssuer, "oidc-issuer", envOr("OIDC_ISSUER", "https://privasys.id"),
-		"Platform OIDC issuer whose JWKS validates privileged bearer tokens; empty disables OIDC auth (env: OIDC_ISSUER)")
+		"Platform OIDC issuer whose JWKS validates end-user (inference) and manager (load/unload) bearer tokens. Inference authentication is mandatory, so an empty issuer leaves no way to authenticate callers and rejects all inference with 401 (env: OIDC_ISSUER)")
 	fs.StringVar(&cfg.OIDCAudience, "oidc-audience", envOr("OIDC_AUDIENCE", ""),
 		"Required aud on a verified token; empty skips the audience check (env: OIDC_AUDIENCE)")
 	fs.StringVar(&cfg.ManagerRole, "manager-role", envOr("MANAGER_ROLE", "privasys-platform:manager"),
@@ -239,8 +229,6 @@ func Parse(args []string) (*Config, error) {
 		"IdP revoked-session feed to poll; empty derives <OIDC_ISSUER>/sessions/revoked (env: REVOKED_SIDS_URL)")
 	fs.DurationVar(&cfg.RevokedSidsInterval, "revoked-sids-interval", envDuration("REVOKED_SIDS_INTERVAL", 60*time.Second),
 		"Revoked-sid poll cadence (env: REVOKED_SIDS_INTERVAL)")
-	fs.BoolVar(&cfg.InferenceAuthRequired, "inference-auth-required", envBool("INFERENCE_AUTH_REQUIRED", false),
-		"Reject unauthenticated inference with 401; when false, callers are still attributed for metering when a token is present (env: INFERENCE_AUTH_REQUIRED)")
 	fs.BoolVar(&cfg.MCPRATLS, "mcp-ratls", envBool("MCP_RATLS", true),
 		"Carry MCP tool calls over per-request attested RA-TLS to the tool enclaves; disable only for local dev against plain-HTTP servers (env: MCP_RATLS)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),

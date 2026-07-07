@@ -228,31 +228,24 @@ func TestAuthorizeInference(t *testing.T) {
 	tok := mint(map[string]any{"iss": issuer, "sub": "user-2", "exp": float64(time.Now().Add(time.Hour).Unix())})
 	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
 
-	// Flag off + anonymous → allowed, no caller.
-	r2, ok := h.authorizeInference(httptest.NewRecorder(), httptest.NewRequest("POST", "/", nil))
-	if !ok || callerFromContext(r2.Context()) != "" {
-		t.Fatalf("flag off anon: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
-	}
-	// Flag off + valid → allowed, caller attributed.
-	r := httptest.NewRequest("POST", "/", nil)
-	r.Header.Set("X-App-Auth", tok)
-	r2, ok = h.authorizeInference(httptest.NewRecorder(), r)
-	if !ok || callerFromContext(r2.Context()) != "user-2" {
-		t.Fatalf("flag off valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
-	}
-	// Flag on + anonymous → 401. Enforcement is the runtime atomic (settable
-	// via /configure), not the raw cfg field.
-	h.inferenceAuth.Store(true)
+	// Authentication is mandatory: anonymous → 401.
 	rec := httptest.NewRecorder()
 	if _, ok := h.authorizeInference(rec, httptest.NewRequest("POST", "/", nil)); ok || rec.Code != http.StatusUnauthorized {
-		t.Fatalf("flag on anon: ok=%v code=%d", ok, rec.Code)
+		t.Fatalf("anon must be rejected: ok=%v code=%d", ok, rec.Code)
 	}
-	// Flag on + valid → allowed, caller attributed.
+	// Valid token on the proxied path (X-App-Auth) → allowed, caller attributed.
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-App-Auth", tok)
+	r2, ok := h.authorizeInference(httptest.NewRecorder(), r)
+	if !ok || callerFromContext(r2.Context()) != "user-2" {
+		t.Fatalf("proxied valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+	}
+	// Valid token on the direct path (Authorization: Bearer) → allowed, attributed.
 	r = httptest.NewRequest("POST", "/", nil)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	r2, ok = h.authorizeInference(httptest.NewRecorder(), r)
 	if !ok || callerFromContext(r2.Context()) != "user-2" {
-		t.Fatalf("flag on valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+		t.Fatalf("direct valid: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
 	}
 }
 

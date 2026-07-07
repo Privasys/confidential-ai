@@ -92,15 +92,16 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 	return claims.Subject, nil
 }
 
-// authorizeInference resolves the end-user on an inference request and, when
-// enforcement is on (h.inferenceAuth, seeded from InferenceAuthRequired and
-// overridable via POST /configure), rejects an anonymous/invalid/revoked caller
-// with 401. On success it returns the request carrying the verified caller
-// subject in context (empty when anonymous and auth is not required) for the
-// metering path.
+// authorizeInference resolves the end-user on an inference request and rejects
+// an anonymous/invalid/revoked caller with 401. Authentication is mandatory:
+// privacy is guaranteed by the confidential-computing enclave (the prompt is
+// never visible to us, provable via the enclave measurements and attestation),
+// not by anonymity, so every caller is identified. On success it returns the
+// request carrying the verified caller subject in context for the metering
+// path.
 func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	sub, err := h.resolveCaller(r)
-	if h.inferenceAuth.Load() && sub == "" {
+	if sub == "" {
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid credential")
 		} else {
@@ -108,9 +109,7 @@ func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*h
 		}
 		return r, false
 	}
-	if sub != "" {
-		r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, sub))
-	}
+	r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, sub))
 	return r, true
 }
 

@@ -94,6 +94,56 @@ func TestBuildVLLMArgs_OmitsTuningFlagsByDefault(t *testing.T) {
 	}
 }
 
+func TestBuildVLLMArgs_EmbedTask(t *testing.T) {
+	req := LoadRequest{Task: TaskEmbed, Model: "qwen3-embedding-06b", Dtype: "auto", MaxModelLen: 32768, GPUMemoryUtilization: 0.05, MaxNumSeqs: 4}
+	args := buildVLLMArgs(req, "/models/qwen3-embedding-06b", 8001)
+
+	if got := flagValue(args, "--task"); got != "embed" {
+		t.Fatalf("--task: got %q, want embed: %v", got, args)
+	}
+	if got := flagValue(args, "--port"); got != "8001" {
+		t.Fatalf("--port: got %q, want 8001", got)
+	}
+	for _, flag := range []string{"--reasoning-parser", "--tool-call-parser", "--chat-template", "--default-chat-template-kwargs", "--hf-overrides"} {
+		if slices.Contains(args, flag) {
+			t.Errorf("embed task must not emit %s: %v", flag, args)
+		}
+	}
+}
+
+func TestBuildVLLMArgs_RerankTask(t *testing.T) {
+	overrides := `{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}`
+	req := LoadRequest{Task: TaskRerank, Model: "qwen3-reranker-06b", Dtype: "auto", MaxModelLen: 32768, GPUMemoryUtilization: 0.05, MaxNumSeqs: 4, HFOverrides: overrides}
+	args := buildVLLMArgs(req, "/models/qwen3-reranker-06b", 8002)
+
+	if got := flagValue(args, "--task"); got != "score" {
+		t.Fatalf("--task: got %q, want score: %v", got, args)
+	}
+	if got := flagValue(args, "--hf-overrides"); got != overrides {
+		t.Fatalf("--hf-overrides must pass through verbatim: got %q", got)
+	}
+}
+
+func TestBuildVLLMArgs_GenerateHasNoTaskFlag(t *testing.T) {
+	req := LoadRequest{Model: "qwen36-35b-a3b-fp8", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
+	args := buildVLLMArgs(req, "/models/qwen36-35b-a3b-fp8", 8000)
+	if slices.Contains(args, "--task") {
+		t.Fatalf("generate task must not emit --task (vLLM default runner): %v", args)
+	}
+}
+
+func TestNormalizeTask(t *testing.T) {
+	for in, want := range map[Task]Task{"": TaskGenerate, TaskGenerate: TaskGenerate, TaskEmbed: TaskEmbed, TaskRerank: TaskRerank} {
+		got, err := NormalizeTask(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeTask(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := NormalizeTask("classify"); err == nil {
+		t.Error("unknown task must be rejected")
+	}
+}
+
 func TestBuildVLLMArgs_ServedNameBasename(t *testing.T) {
 	req := LoadRequest{Model: "/models/qwen36-35b-a3b-fp8", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
 	args := buildVLLMArgs(req, "/models/qwen36-35b-a3b-fp8", 8000)

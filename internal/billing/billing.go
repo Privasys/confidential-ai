@@ -40,10 +40,14 @@ func (c Config) Disabled() bool {
 }
 
 // usage is one completed inference request's token counts, plus the caller it
-// is attributed to (empty = charge the deployment-owner account).
+// is attributed to (empty = charge the deployment-owner account) and the
+// model slug it was served by (empty = the reporter's default model — the
+// chat LLM; the embed/rerank instances pass their own slug so each model
+// meters under its own ledger resource).
 type usage struct {
 	RequestID    string
 	Caller       string
+	Model        string
 	InputTokens  int64
 	OutputTokens int64
 }
@@ -57,8 +61,12 @@ type reportRequest struct {
 }
 
 type reportRequestLn struct {
-	RequestID    string `json:"request_id"`
-	CallerSub    string `json:"caller_sub,omitempty"`
+	RequestID string `json:"request_id"`
+	CallerSub string `json:"caller_sub,omitempty"`
+	// Model overrides the batch-level model slug for this request
+	// (embed/rerank usage in a multi-model fleet). Empty means the
+	// batch-level model.
+	Model        string `json:"model,omitempty"`
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
 }
@@ -113,15 +121,19 @@ func (r *Reporter) Frozen() bool {
 }
 
 // Record enqueues a completed request's token usage, attributed to caller (the
-// verified end-user subject; empty charges the deployment-owner account). It
-// never blocks: if the queue is full the sample is dropped (best-effort
-// metering). A nil Reporter and zero-token samples are ignored.
-func (r *Reporter) Record(requestID, caller string, inputTokens, outputTokens int64) {
+// verified end-user subject; empty charges the deployment-owner account) and
+// to model (the serving instance's slug; empty means the reporter's default
+// model). It never blocks: if the queue is full the sample is dropped
+// (best-effort metering). A nil Reporter and zero-token samples are ignored.
+func (r *Reporter) Record(requestID, caller, model string, inputTokens, outputTokens int64) {
 	if r == nil || (inputTokens <= 0 && outputTokens <= 0) {
 		return
 	}
+	if model == r.cfg.Model {
+		model = "" // batch-level default; keeps the wire body compact
+	}
 	select {
-	case r.queue <- usage{RequestID: requestID, Caller: caller, InputTokens: inputTokens, OutputTokens: outputTokens}:
+	case r.queue <- usage{RequestID: requestID, Caller: caller, Model: model, InputTokens: inputTokens, OutputTokens: outputTokens}:
 	default:
 		log.Printf("[billing] usage queue full; dropping sample (req=%s)", requestID)
 	}
@@ -196,6 +208,7 @@ func (r *Reporter) send(ctx context.Context, batch []usage) {
 		body.Requests = append(body.Requests, reportRequestLn{
 			RequestID:    u.RequestID,
 			CallerSub:    u.Caller,
+			Model:        u.Model,
 			InputTokens:  u.InputTokens,
 			OutputTokens: u.OutputTokens,
 		})

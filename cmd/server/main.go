@@ -23,26 +23,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create model manager for dynamic model loading.
+	// Create the model fleet for dynamic model loading (generate + embed +
+	// rerank instances, one vLLM subprocess each on vllmPort+0/+1/+2).
 	// If --models-dir points to an existing directory, enable dynamic mode.
 	// Otherwise fall back to legacy mode (vLLM started by entrypoint.sh).
-	var modelMgr *models.Manager
+	var fleet *models.Fleet
 	if info, err := os.Stat(cfg.ModelsDir); err == nil && info.IsDir() {
-		modelMgr = models.NewManager(cfg.ModelsDir, cfg.VLLMPort, cfg.RoothashDir, cfg.StateFile)
+		fleet = models.NewFleet(cfg.ModelsDir, cfg.VLLMPort, cfg.RoothashDir, cfg.StateFile)
 		logJSON("info", "dynamic model loading enabled", map[string]string{
 			"models_dir": cfg.ModelsDir,
 			"state_file": cfg.StateFile,
 		})
-		if restored, err := modelMgr.RestoreFromDisk(); err != nil {
+		if restored, err := fleet.RestoreFromDisk(); err != nil {
 			logJSON("warn", "model auto-restore failed", map[string]string{"error": err.Error()})
-		} else if restored != "" {
-			logJSON("info", "model auto-restore initiated", map[string]string{"model": restored})
+		} else if len(restored) > 0 {
+			fields := map[string]string{}
+			for task, model := range restored {
+				fields[string(task)] = model
+			}
+			logJSON("info", "model auto-restore initiated", fields)
 		}
 	} else {
 		logJSON("info", "legacy mode (vLLM managed by entrypoint)", nil)
 	}
 
-	h := handler.New(cfg, modelMgr)
+	h := handler.New(cfg, fleet)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

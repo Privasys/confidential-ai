@@ -50,6 +50,42 @@ type ToolCallSummary struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// PoolingMetadata is the compact reproducibility block for the pooling
+// endpoints (/v1/embeddings, /v1/rerank). Pooling inference has no
+// sampling parameters — the attested facts are WHICH model produced the
+// vectors/scores (digest = the dm-verity root hash, OID-3.5-style) and
+// the serving stack it ran on. Drive records this alongside its index
+// rows so a reindex-triggering model change is detectable.
+type PoolingMetadata struct {
+	RequestID   string `json:"request_id"`
+	Task        string `json:"task"`
+	Model       string `json:"model"`
+	ModelDigest string `json:"model_digest,omitempty"`
+	VLLMVersion string `json:"vllm_version"`
+	CUDAVersion string `json:"cuda_version"`
+	GPU         string `json:"gpu"`
+	ImageDigest string `json:"image_digest,omitempty"`
+	TeeType     string `json:"tee_type"`
+	Timestamp   string `json:"timestamp"`
+}
+
+// NewPoolingMetadata creates the reproducibility block for an
+// embeddings/rerank response.
+func NewPoolingMetadata(task, model, modelDigest, vllmVersion, cudaVersion, gpu, imageDigest, teeType string) *PoolingMetadata {
+	return &PoolingMetadata{
+		RequestID:   uuid.New().String(),
+		Task:        task,
+		Model:       model,
+		ModelDigest: modelDigest,
+		VLLMVersion: vllmVersion,
+		CUDAVersion: cudaVersion,
+		GPU:         gpu,
+		ImageDigest: imageDigest,
+		TeeType:     teeType,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
 // NewMetadata creates reproducibility metadata from request parameters
 // and system configuration.
 func NewMetadata(

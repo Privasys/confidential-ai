@@ -217,7 +217,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			})
 			if err == nil && rep != nil {
 				if id, in, o, ok := extractUsage(out); ok {
-					rep.Record(id, callerFromContext(r.Context()), in, o)
+					rep.Record(id, callerFromContext(r.Context()), "", in, o)
 				}
 			}
 			return out, err
@@ -233,7 +233,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 			out, err := h.callVLLM(ctx, b)
 			if err == nil && rep != nil {
 				if id, in, o, ok := extractUsage(out); ok {
-					rep.Record(id, callerFromContext(r.Context()), in, o)
+					rep.Record(id, callerFromContext(r.Context()), "", in, o)
 				}
 			}
 			return out, err
@@ -599,11 +599,12 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 func (h *Handler) buildMetadata(p requestParams) *reproducibility.Metadata {
 	modelName := h.cfg.ModelName
 	quantization := h.cfg.Quantization
-	if h.modelMgr != nil {
-		if n := h.modelMgr.ModelName(); n != "" {
+	if h.fleet != nil {
+		gen := h.fleet.Generate()
+		if n := gen.ModelName(); n != "" {
 			modelName = n
 		}
-		if q := h.modelMgr.Quantization(); q != "" {
+		if q := gen.Quantization(); q != "" {
 			quantization = q
 		}
 	}

@@ -33,6 +33,30 @@ const (
 	StateFailed  State = "failed"
 )
 
+// Task selects the vLLM runner mode for an instance. The fleet serves the
+// chat LLM (generate) next to the small pooling models Drive's RAG needs
+// (embed + rerank) on the same GPU, each as its own vLLM subprocess.
+type Task string
+
+const (
+	TaskGenerate Task = "generate"
+	TaskEmbed    Task = "embed"
+	TaskRerank   Task = "rerank"
+)
+
+// NormalizeTask maps the wire value to a known Task ("" means generate,
+// the historic single-model behaviour). Unknown values return an error.
+func NormalizeTask(t Task) (Task, error) {
+	switch t {
+	case "", TaskGenerate:
+		return TaskGenerate, nil
+	case TaskEmbed, TaskRerank:
+		return t, nil
+	default:
+		return "", fmt.Errorf("unknown task %q (want generate, embed or rerank)", t)
+	}
+}
+
 // LoadRequest is the body of POST /v1/models/load.
 //
 // `Model` is the canonical served name. It is what vLLM will register
@@ -46,6 +70,13 @@ const (
 // This split lets the served name stay friendly ("gemma4-31b") even when
 // the on-disk path is awkward ("/models/gemma-4-31b-it").
 type LoadRequest struct {
+	// Task selects the vLLM runner mode. Empty means generate (the chat
+	// LLM). embed serves an OpenAI-compatible /v1/embeddings pooling
+	// model; rerank serves a sequence-classification scorer behind
+	// /v1/rerank. Each task runs as its own vLLM subprocess on its own
+	// port; see Fleet.
+	Task Task `json:"task,omitempty"`
+
 	Model                string  `json:"model"`                            // canonical served name (required)
 	Source               string  `json:"source,omitempty"`                 // optional loader hint: path or HF repo
 	Dtype                string  `json:"dtype,omitempty"`                  // default "auto"
@@ -118,11 +149,20 @@ type LoadRequest struct {
 	// deployments — capturing graphs for batch sizes the scheduler
 	// will never admit only burns VRAM. 0 means vLLM default.
 	MaxCudagraphCaptureSize int `json:"max_cudagraph_capture_size,omitempty"`
+
+	// HFOverrides is a JSON object passed verbatim to `--hf-overrides`.
+	// Auto-filled for known model families (the Qwen3 reranker must be
+	// served as sequence classification: architectures
+	// Qwen3ForSequenceClassification, classifier_from_token [no,yes],
+	// is_original_qwen3_reranker); explicit values win, as with the
+	// parser auto-recipes.
+	HFOverrides string `json:"hf_overrides,omitempty"`
 }
 
 // Status is the response for GET /v1/models/status.
 type Status struct {
 	State       State   `json:"state"`
+	Task        Task    `json:"task,omitempty"`
 	Model       string  `json:"model,omitempty"`
 	ModelDigest string  `json:"model_digest,omitempty"`
 	Progress    float64 `json:"progress,omitempty"`    // 0.0 - 1.0 during loading
@@ -131,8 +171,9 @@ type Status struct {
 	Error       string  `json:"error,omitempty"`
 }
 
-// Manager manages the vLLM subprocess lifecycle.
+// Manager manages one vLLM subprocess lifecycle (one task, one port).
 type Manager struct {
+	task        Task   // runner mode this instance serves
 	modelsDir   string // path to model directory (e.g. /models)
 	vllmPort    int    // port for vLLM to listen on
 	roothashDir string // directory of <model>.roothash files written by disk-mounter
@@ -164,17 +205,29 @@ type Manager struct {
 	appliedReq LoadRequest
 }
 
-// NewManager creates a new model manager. stateFile may be empty to
-// disable persistence (in-process testing). When non-empty the file is
-// written after every successful Load and read by RestoreFromDisk.
-func NewManager(modelsDir string, vllmPort int, roothashDir, stateFile string) *Manager {
+// NewManager creates a new model manager for one task. stateFile may be
+// empty to disable persistence (in-process testing). When non-empty the
+// file is written after every successful Load and read by RestoreFromDisk.
+func NewManager(task Task, modelsDir string, vllmPort int, roothashDir, stateFile string) *Manager {
+	if task == "" {
+		task = TaskGenerate
+	}
 	return &Manager{
+		task:        task,
 		modelsDir:   modelsDir,
 		vllmPort:    vllmPort,
 		roothashDir: roothashDir,
 		stateFile:   stateFile,
 		state:       StateIdle,
 	}
+}
+
+// Task returns the runner mode this instance serves.
+func (m *Manager) Task() Task { return m.task }
+
+// Upstream returns the base URL of this instance's vLLM server.
+func (m *Manager) Upstream() string {
+	return fmt.Sprintf("http://localhost:%d", m.vllmPort)
 }
 
 // Status returns the current model manager status.
@@ -184,6 +237,7 @@ func (m *Manager) Status() Status {
 
 	s := Status{
 		State:       m.state,
+		Task:        m.task,
 		Model:       m.model,
 		ModelDigest: m.modelDigest,
 	}
@@ -242,26 +296,49 @@ func (m *Manager) Quantization() string {
 // instance did nothing, and tool-augmented prompts then blew the stale
 // context window).
 func (m *Manager) Load(req LoadRequest) error {
+	// The instance's task is fixed at construction; the request either
+	// matches or is silently stamped (callers route by task already).
+	req.Task = m.task
+
 	// Apply defaults FIRST so idempotency compares effective requests,
 	// not wire requests.
 	if req.Dtype == "" {
 		req.Dtype = "auto"
 	}
-	if req.MaxModelLen == 0 {
-		req.MaxModelLen = 8192
-	}
-	if req.GPUMemoryUtilization == 0 {
-		req.GPUMemoryUtilization = 0.90
-	}
-	if req.MaxNumSeqs == 0 {
-		// vLLM's own default (1024) is sized for serving clusters and
-		// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
-		// block per decode sequence) fail at KV-cache init on a single
-		// H100. NOTE: for such models a high value can still abort CUDA
-		// graph capture ("max_num_seqs exceeds available Mamba cache
-		// blocks") at long contexts — cap max_model_len accordingly, or
-		// lower this via the load request's max_num_seqs.
-		req.MaxNumSeqs = 256
+	if m.task == TaskEmbed || m.task == TaskRerank {
+		// Pooling / classification instances share the GPU with the main
+		// LLM: small utilisation slice (~4 GiB on an H100: ~1.2 GiB bf16
+		// weights + CUDA context + capped-MNBT activations), full 32k
+		// document context, and a tight batch cap so embedding bursts
+		// don't add decode jitter to the chat model (CC mode has no MPS;
+		// the CUDA contexts time-slice). See vllm-memory-tuning.md and
+		// ai-plan §7.5.
+		if req.MaxModelLen == 0 {
+			req.MaxModelLen = 32768
+		}
+		if req.GPUMemoryUtilization == 0 {
+			req.GPUMemoryUtilization = 0.05
+		}
+		if req.MaxNumSeqs == 0 {
+			req.MaxNumSeqs = 4
+		}
+	} else {
+		if req.MaxModelLen == 0 {
+			req.MaxModelLen = 8192
+		}
+		if req.GPUMemoryUtilization == 0 {
+			req.GPUMemoryUtilization = 0.90
+		}
+		if req.MaxNumSeqs == 0 {
+			// vLLM's own default (1024) is sized for serving clusters and
+			// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
+			// block per decode sequence) fail at KV-cache init on a single
+			// H100. NOTE: for such models a high value can still abort CUDA
+			// graph capture ("max_num_seqs exceeds available Mamba cache
+			// blocks") at long contexts — cap max_model_len accordingly, or
+			// lower this via the load request's max_num_seqs.
+			req.MaxNumSeqs = 256
+		}
 	}
 
 	m.mu.Lock()
@@ -400,6 +477,21 @@ func (m *Manager) doLoad(req LoadRequest) {
 	}
 	modelPath := m.resolveModelPath(loaderID)
 
+	// Pooling / classification instances take none of the chat recipes
+	// below (a reasoning parser on an embedding model is at best noise,
+	// and "qwen3-embedding-06b" would substring-match the qwen3 recipe).
+	// The one family auto-default they DO get is the Qwen3 reranker's
+	// sequence-classification hf_overrides: vLLM must load it as
+	// Qwen3ForSequenceClassification with the yes-logit as the score.
+	if req.Task == TaskEmbed || req.Task == TaskRerank {
+		if req.Task == TaskRerank && req.HFOverrides == "" &&
+			strings.Contains(strings.ToLower(req.Model), "qwen3-reranker") {
+			req.HFOverrides = `{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}`
+		}
+		m.runVLLM(ctx, req, loaderID, modelPath)
+		return
+	}
+
 	// Sensible defaults for known model families. Callers (the seed
 	// scripts, the management-service, ad-hoc /v1/models/load) don't
 	// have to know which architecture-specific reasoning + tool
@@ -459,6 +551,13 @@ func (m *Manager) doLoad(req LoadRequest) {
 		}
 	}
 
+	m.runVLLM(ctx, req, loaderID, modelPath)
+}
+
+// runVLLM spawns the vLLM subprocess for the (recipe-applied) request,
+// tracks progress, and blocks until the process exits. Shared tail of
+// doLoad for all tasks; ctx is doLoad's cancellable load context.
+func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelPath string) {
 	args := buildVLLMArgs(req, modelPath, m.vllmPort)
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
@@ -603,6 +702,22 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 		"--served-model-name", servedName,
 		"--seed", "0",
 		"--tensor-parallel-size", "1",
+	}
+
+	// Runner mode. generate is vLLM's default; the pooling instances
+	// select their runner explicitly: `--task embed` serves the
+	// OpenAI-compatible /v1/embeddings pooling API, `--task score`
+	// serves the cross-encoder scoring API behind /v1/rerank (the Qwen3
+	// reranker is loaded as sequence classification via HFOverrides and
+	// scores with the yes-logit).
+	switch req.Task {
+	case TaskEmbed:
+		args = append(args, "--task", "embed")
+	case TaskRerank:
+		args = append(args, "--task", "score")
+	}
+	if req.HFOverrides != "" {
+		args = append(args, "--hf-overrides", req.HFOverrides)
 	}
 
 	batchedTokens := req.MaxNumBatchedTokens
@@ -894,25 +1009,36 @@ func (m *Manager) persistRequest(req LoadRequest) {
 // HTTP server will come up immediately and the model will report
 // state=loading until it's ready.
 func (m *Manager) RestoreFromDisk() (string, error) {
+	req, err := m.readPersistedRequest()
+	if err != nil || req == nil {
+		return "", err
+	}
+	if err := m.Load(*req); err != nil {
+		return req.Model, fmt.Errorf("auto-load %s: %w", req.Model, err)
+	}
+	return req.Model, nil
+}
+
+// readPersistedRequest reads and validates the persisted LoadRequest
+// without issuing a Load. Returns (nil, nil) when persistence is
+// disabled or no state file exists.
+func (m *Manager) readPersistedRequest() (*LoadRequest, error) {
 	if m.stateFile == "" {
-		return "", nil
+		return nil, nil
 	}
 	data, err := os.ReadFile(m.stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return nil, nil
 		}
-		return "", fmt.Errorf("read %s: %w", m.stateFile, err)
+		return nil, fmt.Errorf("read %s: %w", m.stateFile, err)
 	}
 	var req LoadRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		return "", fmt.Errorf("parse %s: %w", m.stateFile, err)
+		return nil, fmt.Errorf("parse %s: %w", m.stateFile, err)
 	}
 	if req.Model == "" {
-		return "", fmt.Errorf("state file %s has empty model", m.stateFile)
+		return nil, fmt.Errorf("state file %s has empty model", m.stateFile)
 	}
-	if err := m.Load(req); err != nil {
-		return req.Model, fmt.Errorf("auto-load %s: %w", req.Model, err)
-	}
-	return req.Model, nil
+	return &req, nil
 }

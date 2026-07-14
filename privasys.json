@@ -63,6 +63,66 @@
       }
     },
     {
+      "name": "embed",
+      "description": "Compute embeddings with the confidential embedding model (OpenAI-compatible /v1/embeddings). The caller formats query vs document prompts; the enclave just embeds. Metered per input token under the embedding model's own resource.",
+      "endpoint": "/v1/embeddings",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Embedding model identifier (e.g. qwen3-embedding-06b)"
+          },
+          "input": {
+            "type": "string",
+            "description": "Text to embed, or a JSON array of texts for a batch"
+          },
+          "dimensions": {
+            "type": "string",
+            "description": "Optional output dimensionality (Matryoshka truncation; the model's native width when omitted)"
+          }
+        },
+        "required": ["model", "input"]
+      }
+    },
+    {
+      "name": "rerank",
+      "description": "Score documents against a query with the confidential reranker (/v1/rerank). Served as sequence classification; the relevance score is the yes-logit. Metered per input token.",
+      "endpoint": "/v1/rerank",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Reranker model identifier (e.g. qwen3-reranker-06b)"
+          },
+          "query": {
+            "type": "string",
+            "description": "The search query"
+          },
+          "documents": {
+            "type": "string",
+            "description": "JSON array of candidate document texts to score"
+          },
+          "top_n": {
+            "type": "string",
+            "description": "Return only the N highest-scoring documents"
+          }
+        },
+        "required": ["model", "query", "documents"]
+      }
+    },
+    {
+      "name": "served_models",
+      "role": "status",
+      "description": "The attested serving manifest: build identity plus every served model (task, canonical id, dm-verity digest, state). Dependant enclaves (e.g. Privasys Drive) fetch this over RA-TLS to pin the fleet in their attested-dependency set.",
+      "endpoint": "/.well-known/served-models",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
       "name": "models",
       "description": "List available models on this confidential AI instance.",
       "endpoint": "/v1/models",
@@ -116,16 +176,32 @@
     "name": "load_model",
     "readiness_path": "/readiness",
     "status_path": "/v1/models/status",
-    "title": "Model & vLLM settings",
-    "description": "Load the model this instance serves. Inference stays unavailable until a model is loaded; a large model can take several minutes to load (follow progress with the model_status action).",
+    "title": "Models & vLLM settings",
+    "description": "Load the models this instance serves: the chat LLM, plus optional embedding and reranker sidecars on the same GPU. The instance becomes ready only when ALL configured models are loaded (the main model first, ~15 min cold; the small models load in seconds - follow per-model progress with the model_status action).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "model": {
           "type": "string",
-          "description": "The model this instance serves. The list is the models available on this instance.",
+          "description": "The chat model this instance serves. The list is the models available on this instance.",
           "x-privasys": {
             "label": "Model",
+            "source": { "tool": "model_status", "select": "available" }
+          }
+        },
+        "embedding_model": {
+          "type": "string",
+          "description": "Optional embedding model served behind /v1/embeddings (own vLLM instance, ~5% GPU memory). Leave blank to serve none.",
+          "x-privasys": {
+            "label": "Embedding model",
+            "source": { "tool": "model_status", "select": "available" }
+          }
+        },
+        "rerank_model": {
+          "type": "string",
+          "description": "Optional reranker served behind /v1/rerank (own vLLM instance, ~5% GPU memory). Leave blank to serve none.",
+          "x-privasys": {
+            "label": "Rerank model",
             "source": { "tool": "model_status", "select": "available" }
           }
         },
@@ -154,9 +230,27 @@
         },
         "gpu_memory_utilization": {
           "type": "number",
-          "description": "GPU memory utilization (0.0-1.0).",
-          "default": 0.93,
+          "description": "GPU memory utilization for the chat model (0.0-1.0). 0.86 leaves room for the embedding + reranker sidecars (~0.05 each).",
+          "default": 0.86,
           "x-privasys": { "label": "GPU memory utilisation" }
+        },
+        "enable_chunked_prefill": {
+          "type": "boolean",
+          "description": "Chunked prefill with a bounded token budget. Required for long contexts (>=128k): single-block prefill reserves activations proportional to the context length and wastes 15-25 GiB.",
+          "default": true,
+          "x-privasys": { "label": "Chunked prefill" }
+        },
+        "max_num_batched_tokens": {
+          "type": "integer",
+          "description": "vLLM --max-num-batched-tokens. 32768 is the production 262k recipe with chunked prefill on.",
+          "default": 32768,
+          "x-privasys": { "label": "Max batched tokens" }
+        },
+        "kv_cache_dtype": {
+          "type": "string",
+          "description": "KV cache data type. fp8 halves the attention KV footprint (part of the attested config; changes outputs vs fp16 KV).",
+          "default": "fp8",
+          "x-privasys": { "label": "KV cache dtype" }
         }
       },
       "required": ["model"]

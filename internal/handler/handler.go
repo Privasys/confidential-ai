@@ -38,9 +38,11 @@ var (
 // Handler is the HTTP handler that proxies to vLLM and injects
 // reproducibility metadata into every response.
 type Handler struct {
-	cfg      *config.Config
-	client   *http.Client
-	modelMgr *models.Manager
+	cfg    *config.Config
+	client *http.Client
+	// fleet coordinates the vLLM instances (generate + embed + rerank).
+	// nil in legacy mode (vLLM started by entrypoint.sh, single model).
+	fleet *models.Fleet
 
 	// agentCatalog + agentDispatcher are non-nil when MCPServers is set
 	// in config. When set, /v1/chat/completions runs through the
@@ -108,18 +110,18 @@ type Handler struct {
 	requestsFailed atomic.Int64
 }
 
-// New creates a Handler with the given config and model manager.
-// If modelMgr is nil, falls back to legacy mode (polling vLLM at startup).
-func New(cfg *config.Config, modelMgr *models.Manager) *Handler {
+// New creates a Handler with the given config and model fleet.
+// If fleet is nil, falls back to legacy mode (polling vLLM at startup).
+func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	h := &Handler{
-		cfg:      cfg,
-		modelMgr: modelMgr,
+		cfg:   cfg,
+		fleet: fleet,
 		client: &http.Client{
 			Timeout: 5 * time.Minute, // LLM inference can be slow
 		},
 	}
-	// Legacy mode: poll vLLM health at startup if model manager is not used.
-	if modelMgr == nil && cfg.ModelName != "" {
+	// Legacy mode: poll vLLM health at startup if the fleet is not used.
+	if fleet == nil && cfg.ModelName != "" {
 		go h.pollUpstreamReady()
 	}
 	if servers, err := agent.ParseServerSpec(cfg.MCPServers); err != nil {
@@ -273,23 +275,30 @@ func (h *Handler) pollUpstreamReady() {
 	}
 }
 
-// IsReady returns whether inference is available (model loaded and serving).
+// IsReady returns whether inference is available. In fleet mode this is
+// the AGGREGATE readiness: every configured model (generate + embed +
+// rerank as desired) must be serving — the configure-then-freeze gate
+// covers all of them.
 func (h *Handler) IsReady() bool {
-	if h.modelMgr != nil {
-		return h.modelMgr.IsReady()
+	if h.fleet != nil {
+		return h.fleet.IsReady()
 	}
 	return h.ready.Load() == 1
 }
 
 // NotReadyMessage describes WHY inference is unavailable. The historic
 // catch-all "Model is loading" was actively misleading when the
-// manager was idle (no load ever requested) or a load had failed.
+// manager was idle (no load ever requested) or a load had failed. In
+// fleet mode the aggregate message names WHICH model is still loading.
 func (h *Handler) NotReadyMessage() string {
-	if h.modelMgr == nil {
+	if h.fleet == nil {
 		return "Model is loading, please wait..."
 	}
-	switch s := h.modelMgr.Status(); s.State {
+	switch s := h.fleet.Status(); s.State {
 	case models.StateLoading:
+		if s.Message != "" {
+			return "Loading: " + s.Message
+		}
 		return "Model is loading, please wait..."
 	case models.StateFailed:
 		return "Model load failed: " + s.Error + ". Retry via POST /v1/models/load."
@@ -302,6 +311,8 @@ func (h *Handler) NotReadyMessage() string {
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.chatCompletions)
 	mux.HandleFunc("POST /v1/completions", h.completions)
+	mux.HandleFunc("POST /v1/embeddings", h.embeddings)
+	mux.HandleFunc("POST /v1/rerank", h.rerank)
 	mux.HandleFunc("GET /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models/load", h.requireLoadAuth(h.modelsLoad))
@@ -313,6 +324,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /healthz", h.health)
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
+	mux.HandleFunc("GET /.well-known/served-models", h.servedModels)
 	mux.HandleFunc("GET /metrics", h.metrics)
 	mux.HandleFunc("POST /v1/agent/confirm/{id}", h.agentConfirm)
 	mux.HandleFunc("POST /configure", h.configure)
@@ -445,6 +457,147 @@ func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 	h.proxyWithReproducibility(w, r, "/v1/completions")
 }
 
+// embeddings proxies to the fleet's embed instance (/v1/embeddings,
+// OpenAI-compatible). Same mandatory inference auth and freeze gate as
+// chat: the caller is the authenticated principal (e.g. forwarded by the
+// Drive enclave) and usage debits THAT principal's account, metered
+// under the embedding model's own slug.
+func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
+	r, ok := h.authorizeInference(w, r)
+	if !ok {
+		return
+	}
+	h.proxyPooling(w, r, models.TaskEmbed, "/v1/embeddings")
+}
+
+// rerank proxies to the fleet's rerank instance (/v1/rerank, served as
+// sequence classification; score = the yes-logit). Input-token metering
+// only — the score output is negligible.
+func (h *Handler) rerank(w http.ResponseWriter, r *http.Request) {
+	r, ok := h.authorizeInference(w, r)
+	if !ok {
+		return
+	}
+	h.proxyPooling(w, r, models.TaskRerank, "/v1/rerank")
+}
+
+// proxyPooling forwards a request to a pooling instance (embed/rerank)
+// and returns the response. Non-streaming by nature (both APIs return a
+// single JSON document). Meters input tokens under the instance's model
+// slug; with the X-Privasys-Reproducibility opt-in the response gains a
+// compact reproducibility block (model digest + serving config).
+func (h *Handler) proxyPooling(w http.ResponseWriter, r *http.Request, task models.Task, path string) {
+	if h.fleet == nil {
+		writeError(w, http.StatusNotImplemented, string(task)+" is not available (legacy mode)")
+		return
+	}
+	inst := h.fleet.Instance(task)
+	if !inst.IsReady() {
+		msg := string(task) + " model is not loaded"
+		if s := inst.Status(); s.State == models.StateLoading {
+			msg = string(task) + " model is loading: " + s.Message
+		}
+		writeError(w, http.StatusServiceUnavailable, msg+". Configure one via POST /v1/models/load.")
+		return
+	}
+	// Balance gate: same pricing model as chat inference.
+	if h.billingReporter().Frozen() {
+		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
+		return
+	}
+	h.requestsTotal.Add(1)
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	upstream := inst.Upstream() + path
+	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream, bytes.NewReader(body))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, "failed to create upstream request")
+		return
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.client.Do(proxyReq)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("vLLM upstream error: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadGateway, "failed to read upstream response")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	// Meter input tokens under this instance's slug. Embeddings report
+	// usage.prompt_tokens; the rerank API may only carry total_tokens —
+	// for a scorer they are the same thing (no completion tokens).
+	if rep := h.billingReporter(); rep != nil {
+		if id, in, ok := extractPoolingUsage(respBody); ok {
+			rep.Record(id, callerFromContext(r.Context()), inst.ModelName(), in, 0)
+		}
+	}
+
+	if wantsReproducibility(r) {
+		var doc map[string]any
+		if json.Unmarshal(respBody, &doc) == nil {
+			doc["reproducibility"] = reproducibility.NewPoolingMetadata(
+				string(task),
+				inst.ModelName(),
+				inst.ModelDigest(),
+				h.cfg.VLLMVersion,
+				h.cfg.CUDAVersion,
+				h.cfg.GPUType,
+				h.cfg.ImageDigest,
+				h.cfg.TeeType,
+			)
+			if out, err := json.Marshal(doc); err == nil {
+				respBody = out
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
+}
+
+// extractPoolingUsage parses the billable input-token count from an
+// embeddings/rerank response. ok is false when no usage block is present.
+func extractPoolingUsage(body []byte) (id string, in int64, ok bool) {
+	var e struct {
+		ID    string `json:"id"`
+		Usage *struct {
+			PromptTokens int64 `json:"prompt_tokens"`
+			TotalTokens  int64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || e.Usage == nil {
+		return "", 0, false
+	}
+	in = e.Usage.PromptTokens
+	if in == 0 {
+		in = e.Usage.TotalTokens
+	}
+	return e.ID, in, in > 0
+}
+
 // proxyPassthrough forwards the request to vLLM and streams the
 // response back verbatim, WITHOUT injecting the reproducibility
 // metadata event. Used for OpenAI-compatible clients that supply
@@ -509,7 +662,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
 			if id, in, out, ok := extractUsage(respBody); ok {
-				rep.Record(id, callerFromContext(r.Context()), in, out)
+				rep.Record(id, callerFromContext(r.Context()), "", in, out)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -670,14 +823,16 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	defer resp.Body.Close()
 
 	// Build reproducibility metadata.
-	// Use dynamic model info from manager if available, else fall back to config.
+	// Use dynamic model info from the fleet's generate instance if
+	// available, else fall back to config.
 	modelName := h.cfg.ModelName
 	quantization := h.cfg.Quantization
-	if h.modelMgr != nil {
-		if n := h.modelMgr.ModelName(); n != "" {
+	if h.fleet != nil {
+		gen := h.fleet.Generate()
+		if n := gen.ModelName(); n != "" {
 			modelName = n
 		}
-		if q := h.modelMgr.Quantization(); q != "" {
+		if q := gen.Quantization(); q != "" {
 			quantization = q
 		}
 	}
@@ -712,6 +867,10 @@ type meterCtx struct {
 	// caller is the verified end-user subject usage is attributed to (empty =
 	// deployment-owner account).
 	caller string
+	// model is the serving instance's slug (empty = the reporter's default
+	// model, i.e. the chat LLM; the embed/rerank paths set their own slug so
+	// each model meters under its own ledger resource).
+	model string
 	// suppressUsage strips the synthetic stream usage chunk we injected via
 	// stream_options.include_usage so a client that did not opt in still sees
 	// an unchanged stream.
@@ -723,7 +882,7 @@ func (m *meterCtx) record(requestID string, in, out int64) {
 	if m == nil {
 		return
 	}
-	m.reporter.Record(requestID, m.caller, in, out)
+	m.reporter.Record(requestID, m.caller, m.model, in, out)
 }
 
 // wantsReproducibility reports whether the caller opted in to the
@@ -946,9 +1105,10 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	modelDigest := h.cfg.ModelDigest
 	quantization := h.cfg.Quantization
 	modelState := "unknown"
+	var perModel map[models.Task]models.Status
 
-	if h.modelMgr != nil {
-		status := h.modelMgr.Status()
+	if h.fleet != nil {
+		status := h.fleet.Status()
 		modelState = string(status.State)
 		if status.Model != "" {
 			modelName = status.Model
@@ -956,9 +1116,10 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 		if status.ModelDigest != "" {
 			modelDigest = status.ModelDigest
 		}
-		if q := h.modelMgr.Quantization(); q != "" {
+		if q := h.fleet.Generate().Quantization(); q != "" {
 			quantization = q
 		}
+		perModel = status.Models
 	} else if h.IsReady() {
 		modelState = "ready"
 	} else {
@@ -975,6 +1136,9 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 		"tee":          h.cfg.TeeType,
 		"vllm_version": h.cfg.VLLMVersion,
 		"image_digest": h.cfg.ImageDigest,
+	}
+	if len(perModel) > 0 {
+		body["models"] = perModel
 	}
 	// Build provenance (stamped via -ldflags at image build; absent on
 	// unstamped dev builds). Lets clients display + link the backend commit.
@@ -1002,31 +1166,72 @@ func (h *Handler) readiness(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
-// modelsLoad handles POST /v1/models/load - starts loading a model.
+// loadPayload is the body of POST /v1/models/load: the flat generate-model
+// LoadRequest (unchanged wire shape, so existing orchestrators keep
+// working), extended with the fleet's pooling models. The payload is
+// DECLARATIVE: embedding_model / rerank_model absent (or empty) means
+// that instance is not part of the desired state and gets unloaded.
+// Setting `task` to embed/rerank instead addresses a single instance
+// ad-hoc without touching the others (dev/testing path).
+type loadPayload struct {
+	models.LoadRequest
+	// EmbeddingModel is the canonical slug served behind /v1/embeddings
+	// (loaded with `--task embed` on its own port; ~0.05 GPU util).
+	EmbeddingModel string `json:"embedding_model,omitempty"`
+	// RerankModel is the canonical slug served behind /v1/rerank
+	// (loaded as sequence classification with `--task score`).
+	RerankModel string `json:"rerank_model,omitempty"`
+}
+
+// modelsLoad handles POST /v1/models/load - reconciles the fleet towards
+// the requested model set. Loads are sequenced main-model-first; progress
+// is reported per model via GET /v1/models/status.
 func (h *Handler) modelsLoad(w http.ResponseWriter, r *http.Request) {
-	if h.modelMgr == nil {
+	if h.fleet == nil {
 		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
 		return
 	}
 
-	var req models.LoadRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	var p loadPayload
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if req.Model == "" {
+	task, err := models.NormalizeTask(p.Task)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if p.Model == "" {
 		writeError(w, http.StatusBadRequest, "model field is required")
 		return
 	}
 
-	if err := h.modelMgr.Load(req); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
+	if task != models.TaskGenerate {
+		// Ad-hoc single-instance load: touch only this task.
+		req := p.LoadRequest
+		req.Task = task
+		if err := h.fleet.Apply(map[models.Task]models.LoadRequest{task: req}, false); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	} else {
+		reqs := map[models.Task]models.LoadRequest{models.TaskGenerate: p.LoadRequest}
+		if p.EmbeddingModel != "" {
+			reqs[models.TaskEmbed] = models.LoadRequest{Task: models.TaskEmbed, Model: p.EmbeddingModel}
+		}
+		if p.RerankModel != "" {
+			reqs[models.TaskRerank] = models.LoadRequest{Task: models.TaskRerank, Model: p.RerankModel}
+		}
+		if err := h.fleet.Apply(reqs, true); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(h.modelMgr.Status())
+	json.NewEncoder(w).Encode(h.fleet.Status())
 }
 
 // modelsStatus handles GET /v1/models/status - returns model loading state
@@ -1034,27 +1239,41 @@ func (h *Handler) modelsLoad(w http.ResponseWriter, r *http.Request) {
 // offer a pick-list without a separate round-trip). `available` is omitted
 // on read errors rather than failing the status call.
 func (h *Handler) modelsStatus(w http.ResponseWriter, _ *http.Request) {
-	if h.modelMgr == nil {
+	if h.fleet == nil {
 		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
 		return
 	}
 
-	avail, _ := h.modelMgr.ListAvailable()
+	avail, _ := h.fleet.ListAvailable()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
-		models.Status
+		models.FleetStatus
 		Available []string `json:"available,omitempty"`
-	}{h.modelMgr.Status(), avail})
+	}{h.fleet.Status(), avail})
 }
 
-// modelsUnload handles POST /v1/models/unload - stops vLLM and frees resources.
-func (h *Handler) modelsUnload(w http.ResponseWriter, _ *http.Request) {
-	if h.modelMgr == nil {
+// modelsUnload handles POST /v1/models/unload - stops vLLM and frees
+// resources. An optional {"task": "embed"} body unloads one instance;
+// no/empty body unloads the whole fleet.
+func (h *Handler) modelsUnload(w http.ResponseWriter, r *http.Request) {
+	if h.fleet == nil {
 		writeError(w, http.StatusNotImplemented, "dynamic model loading not available (legacy mode)")
 		return
 	}
 
-	if err := h.modelMgr.Unload(); err != nil {
+	var p struct {
+		Task models.Task `json:"task"`
+	}
+	// Body is optional; decode errors on an empty body are expected.
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&p)
+
+	var err error
+	if p.Task == "" {
+		err = h.fleet.UnloadAll()
+	} else {
+		err = h.fleet.Unload(p.Task)
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "unload failed: "+err.Error())
 		return
 	}
@@ -1083,10 +1302,13 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 	}
 	var exts []entry
 
-	// Use dynamic model digest from manager if available, else fall back to config.
+	// Use the generate instance's dynamic model digest if available, else
+	// fall back to config. OID 3.5 stays the CHAT model's digest — the
+	// historic single-model semantics verifiers rely on; the pooling
+	// models' digests are published per-model via /.well-known/served-models.
 	digest := h.cfg.ModelDigest
-	if h.modelMgr != nil {
-		if d := h.modelMgr.ModelDigest(); d != "" {
+	if h.fleet != nil {
+		if d := h.fleet.Generate().ModelDigest(); d != "" {
 			digest = d
 		}
 	}
@@ -1120,6 +1342,67 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exts)
+}
+
+// servedModels handles GET /.well-known/served-models: the attested
+// serving manifest for dependant enclaves (ai-plan §7.5). Drive fetches
+// this over RA-TLS (the transport already proves the fleet's measurement
+// and image), pins the build + model set in its manager-enforced
+// AttestedDependencySet (OID 1.3.6.1.4.1.65230.6.1), discloses it in its
+// own attestation, and fails closed on mismatch. Each model entry
+// carries the dm-verity root hash of the disk it was loaded from — an
+// embedding-model change is a Drive reindex event, so the pin must be
+// updated deliberately on fleet upgrades.
+func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
+	type servedModel struct {
+		Task   string `json:"task"`
+		Model  string `json:"model"`
+		Digest string `json:"digest,omitempty"`
+		State  string `json:"state"`
+	}
+	doc := map[string]any{
+		"image_digest": h.cfg.ImageDigest,
+		"tee":          h.cfg.TeeType,
+		"gpu":          h.cfg.GPUType,
+		"vllm_version": h.cfg.VLLMVersion,
+		"cuda_version": h.cfg.CUDAVersion,
+	}
+	if BuildCommit != "" {
+		doc["commit"] = BuildCommit
+	}
+	if BuildVersion != "" {
+		doc["version"] = BuildVersion
+	}
+	served := []servedModel{}
+	if h.fleet != nil {
+		status := h.fleet.Status()
+		for _, task := range []models.Task{models.TaskGenerate, models.TaskEmbed, models.TaskRerank} {
+			s, ok := status.Models[task]
+			if !ok || s.Model == "" {
+				continue
+			}
+			served = append(served, servedModel{
+				Task:   string(task),
+				Model:  s.Model,
+				Digest: s.ModelDigest,
+				State:  string(s.State),
+			})
+		}
+	} else if h.cfg.ModelName != "" {
+		state := "loading"
+		if h.IsReady() {
+			state = "ready"
+		}
+		served = append(served, servedModel{
+			Task:   string(models.TaskGenerate),
+			Model:  h.cfg.ModelName,
+			Digest: h.cfg.ModelDigest,
+			State:  state,
+		})
+	}
+	doc["models"] = served
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(doc)
 }
 
 // metrics returns Prometheus-compatible metrics.

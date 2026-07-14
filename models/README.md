@@ -72,6 +72,34 @@ hardware. Per-request determinism under concurrent traffic still requires
 batch-invariant kernels (tracked separately). See the main README for the
 full reproducibility protocol.
 
+## Pooling sidecars: embedding + rerank (ai-plan §7.5)
+
+The fleet serves two small pooling models NEXT TO the chat LLM on the
+same H100, each as its own vLLM subprocess (`internal/models/fleet.go`;
+generate on `--vllm-port`, embed on `+1`, rerank on `+2`):
+
+| Canonical id | Model | Serving | Endpoint | Disk |
+|--------------|-------|---------|----------|------|
+| `qwen3-embedding-06b` | Qwen/Qwen3-Embedding-0.6B | `--task embed` | `POST /v1/embeddings` | model-qwen3-embedding-06b (2 GB + verity) |
+| `qwen3-reranker-06b` | Qwen/Qwen3-Reranker-0.6B | `--task score` + seq-classification `--hf-overrides` (score = yes-logit) | `POST /v1/rerank` | model-qwen3-reranker-06b (2 GB + verity) |
+
+Configure via the flat load payload: `{"model": "qwen36-35b-a3b-fp8",
+"embedding_model": "qwen3-embedding-06b", "rerank_model":
+"qwen3-reranker-06b", ...}`. The payload is declarative (omitting a
+sidecar unloads it); loads are sequenced main-model-first so the LLM
+claims its memory slice (util 0.86) before the sidecars take ~0.05
+each. Readiness = ALL configured models serving; `GET /v1/models/status`
+carries per-task progress under `models`, and the aggregate `message`
+names which model is loading.
+
+Both endpoints sit behind the same mandatory inference auth and freeze
+gate as chat, and meter input tokens under their own ledger resources
+(`ai_input_tokens_qwen3_{embedding,reranker}_06b`, 0.1 cr/token). The
+attested serving manifest for dependants (Privasys Drive pins the fleet
+via OID 65230.6.1) is `GET /.well-known/served-models`: build identity +
+every served model with its dm-verity digest. An embedding-model change
+is a Drive reindex event — version deliberately.
+
 ## Canonical model id (a.k.a. `--served-model-name`)
 
 The string clients put in the `model` field of `POST /v1/chat/completions`

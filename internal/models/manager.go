@@ -307,17 +307,19 @@ func (m *Manager) Load(req LoadRequest) error {
 	}
 	if m.task == TaskEmbed || m.task == TaskRerank {
 		// Pooling / classification instances share the GPU with the main
-		// LLM: small utilisation slice (~4 GiB on an H100: ~1.2 GiB bf16
-		// weights + CUDA context + capped-MNBT activations), full 32k
-		// document context, and a tight batch cap so embedding bursts
-		// don't add decode jitter to the chat model (CC mode has no MPS;
-		// the CUDA contexts time-slice). See vllm-memory-tuning.md and
-		// ai-plan §7.5.
+		// LLM: a small utilisation slice with full 32k document context,
+		// and a tight batch cap so embedding bursts don't add decode
+		// jitter to the chat model (CC mode has no MPS; the CUDA contexts
+		// time-slice). 0.08 measured on H100-80GB: ~1.2 GiB bf16 weights
+		// + ~1.2 GiB CUDA/activations + the 3.5 GiB KV floor vLLM demands
+		// for one 32k sequence (util 0.05 left only 1.68 GiB KV and the
+		// engine refused to start). See vllm-memory-tuning.md, ai-plan
+		// §7.5.
 		if req.MaxModelLen == 0 {
 			req.MaxModelLen = 32768
 		}
 		if req.GPUMemoryUtilization == 0 {
-			req.GPUMemoryUtilization = 0.05
+			req.GPUMemoryUtilization = 0.08
 		}
 		if req.MaxNumSeqs == 0 {
 			req.MaxNumSeqs = 4
@@ -864,9 +866,18 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 	// weight load). Misconfigurations that will never become ready
 	// (e.g. max_model_len too large → vLLM OOMs during profile_run)
 	// hold the lock the whole time and block other loads / restarts
-	// for nothing, so cap at 15 min: still 2× a cold compile, but
-	// fails an OOM-bound load in a reasonable window.
-	for i := 0; i < 180; i++ {
+	// for nothing, so cap at 15 min for the small pooling models.
+	//
+	// The generate instance gets 25 min: with a fresh container overlay
+	// the full cold path stacks FlashInfer JIT (~8 min) + 35 GB weight
+	// load off a cold page cache (~6 min) + 262k KV init and CUDA-graph
+	// capture (~3-4 min), which lands right ON a 15-min wire (observed
+	// twice on m5-dev-ai, 2026-07-15) and burns a whole cycle per miss.
+	iterations := 180
+	if m.task == TaskGenerate {
+		iterations = 300
+	}
+	for i := 0; i < iterations; i++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -883,7 +894,7 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("vLLM not ready after 15 minutes")
+	return fmt.Errorf("vLLM not ready after %d minutes", iterations*5/60)
 }
 
 // lookupVerityRoothash returns the dm-verity root hash for the given model

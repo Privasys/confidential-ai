@@ -230,8 +230,8 @@
         },
         "gpu_memory_utilization": {
           "type": "number",
-          "description": "GPU memory utilization for the chat model (0.0-1.0). 0.86 leaves room for the embedding + reranker sidecars (~0.05 each).",
-          "default": 0.86,
+          "description": "GPU memory utilization for the chat model (0.0-1.0). 0.82 leaves room for the embedding + reranker sidecars (~0.08 each: vLLM's KV floor for one 32k sequence is 3.5 GiB per pooling instance).",
+          "default": 0.82,
           "x-privasys": { "label": "GPU memory utilisation" }
         },
         "enable_chunked_prefill": {

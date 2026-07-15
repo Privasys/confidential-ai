@@ -705,16 +705,18 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 
 	// Runner mode. generate is vLLM's default; the pooling instances
-	// select their runner explicitly: `--task embed` serves the
-	// OpenAI-compatible /v1/embeddings pooling API, `--task score`
-	// serves the cross-encoder scoring API behind /v1/rerank (the Qwen3
-	// reranker is loaded as sequence classification via HFOverrides and
-	// scores with the yes-logit).
+	// select their runner explicitly. NB vLLM 0.22 removed the legacy
+	// `--task` flag ("unrecognized arguments: --task embed", hit live on
+	// m5-dev-ai): the modern selection is `--runner pooling` plus a
+	// `--convert` adapter — `embed` serves the OpenAI-compatible
+	// /v1/embeddings pooling API, `classify` the cross-encoder scoring
+	// API behind /v1/rerank (the Qwen3 reranker is loaded as sequence
+	// classification via HFOverrides and scores with the yes-logit).
 	switch req.Task {
 	case TaskEmbed:
-		args = append(args, "--task", "embed")
+		args = append(args, "--runner", "pooling", "--convert", "embed")
 	case TaskRerank:
-		args = append(args, "--task", "score")
+		args = append(args, "--runner", "pooling", "--convert", "classify")
 	}
 	if req.HFOverrides != "" {
 		args = append(args, "--hf-overrides", req.HFOverrides)

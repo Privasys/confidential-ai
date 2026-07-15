@@ -98,13 +98,16 @@ func TestBuildVLLMArgs_EmbedTask(t *testing.T) {
 	req := LoadRequest{Task: TaskEmbed, Model: "qwen3-embedding-06b", Dtype: "auto", MaxModelLen: 32768, GPUMemoryUtilization: 0.05, MaxNumSeqs: 4}
 	args := buildVLLMArgs(req, "/models/qwen3-embedding-06b", 8001)
 
-	if got := flagValue(args, "--task"); got != "embed" {
-		t.Fatalf("--task: got %q, want embed: %v", got, args)
+	if got := flagValue(args, "--runner"); got != "pooling" {
+		t.Fatalf("--runner: got %q, want pooling: %v", got, args)
+	}
+	if got := flagValue(args, "--convert"); got != "embed" {
+		t.Fatalf("--convert: got %q, want embed: %v", got, args)
 	}
 	if got := flagValue(args, "--port"); got != "8001" {
 		t.Fatalf("--port: got %q, want 8001", got)
 	}
-	for _, flag := range []string{"--reasoning-parser", "--tool-call-parser", "--chat-template", "--default-chat-template-kwargs", "--hf-overrides"} {
+	for _, flag := range []string{"--task", "--reasoning-parser", "--tool-call-parser", "--chat-template", "--default-chat-template-kwargs", "--hf-overrides"} {
 		if slices.Contains(args, flag) {
 			t.Errorf("embed task must not emit %s: %v", flag, args)
 		}
@@ -116,8 +119,11 @@ func TestBuildVLLMArgs_RerankTask(t *testing.T) {
 	req := LoadRequest{Task: TaskRerank, Model: "qwen3-reranker-06b", Dtype: "auto", MaxModelLen: 32768, GPUMemoryUtilization: 0.05, MaxNumSeqs: 4, HFOverrides: overrides}
 	args := buildVLLMArgs(req, "/models/qwen3-reranker-06b", 8002)
 
-	if got := flagValue(args, "--task"); got != "score" {
-		t.Fatalf("--task: got %q, want score: %v", got, args)
+	if got := flagValue(args, "--runner"); got != "pooling" {
+		t.Fatalf("--runner: got %q, want pooling: %v", got, args)
+	}
+	if got := flagValue(args, "--convert"); got != "classify" {
+		t.Fatalf("--convert: got %q, want classify: %v", got, args)
 	}
 	if got := flagValue(args, "--hf-overrides"); got != overrides {
 		t.Fatalf("--hf-overrides must pass through verbatim: got %q", got)
@@ -127,8 +133,10 @@ func TestBuildVLLMArgs_RerankTask(t *testing.T) {
 func TestBuildVLLMArgs_GenerateHasNoTaskFlag(t *testing.T) {
 	req := LoadRequest{Model: "qwen36-35b-a3b-fp8", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
 	args := buildVLLMArgs(req, "/models/qwen36-35b-a3b-fp8", 8000)
-	if slices.Contains(args, "--task") {
-		t.Fatalf("generate task must not emit --task (vLLM default runner): %v", args)
+	for _, flag := range []string{"--task", "--runner", "--convert"} {
+		if slices.Contains(args, flag) {
+			t.Fatalf("generate task must not emit %s (vLLM default runner): %v", flag, args)
+		}
 	}
 }
 

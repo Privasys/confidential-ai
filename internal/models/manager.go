@@ -611,7 +611,18 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 			m.setFailed("vLLM exited during startup: exit code " + fmt.Sprintf("%d", cmd.ProcessState.ExitCode()))
 		} else {
 			m.setFailed("vLLM health check failed: " + err.Error())
-			_ = cmd.Process.Kill()
+			// Kill the whole process GROUP, exactly like Unload: killing
+			// only the APIServer pid leaks its EngineCore children, which
+			// keep their full GPU allocation alive. Three leaked cores held
+			// 77.6/81.5 GiB on m5-dev-ai (2026-07-15) and starved every
+			// subsequent load into the same timeout — a leak loop.
+			if pgid, perr := syscall.Getpgid(cmd.Process.Pid); perr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGTERM)
+				time.Sleep(2 * time.Second)
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = cmd.Process.Kill()
+			}
 			_ = cmd.Wait()
 		}
 		return
@@ -880,6 +891,7 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 	for i := 0; i < iterations; i++ {
 		select {
 		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "{\"level\":\"warn\",\"msg\":\"waitForReady cancelled\",\"task\":%q,\"iteration\":%d}\n", m.task, i)
 			return ctx.Err()
 		default:
 		}
@@ -890,6 +902,17 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
+		}
+		// One diagnostic line a minute: an opaque 15-minute timeout hid a
+		// GPU-memory leak loop for hours on m5-dev-ai. Cheap to keep.
+		if i%12 == 0 {
+			outcome := "no response"
+			if err != nil {
+				outcome = err.Error()
+			} else {
+				outcome = fmt.Sprintf("status %d", resp.StatusCode)
+			}
+			fmt.Fprintf(os.Stderr, "{\"level\":\"info\",\"msg\":\"waitForReady poll\",\"task\":%q,\"url\":%q,\"iteration\":%d,\"outcome\":%q}\n", m.task, url, i, outcome)
 		}
 
 		time.Sleep(5 * time.Second)

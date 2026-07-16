@@ -251,6 +251,24 @@ func (h *Handler) ReconfigureBilling(cfg billing.Config) {
 // All Reporter methods are nil-safe, so callers can chain directly.
 func (h *Handler) billingReporter() *billing.Reporter { return h.billing.Load() }
 
+// generateModelSlug returns the chat model's canonical slug for usage
+// attribution. Every metered request now stamps its serving model
+// explicitly (per-line `model` on the usage wire), so the platform's
+// billing configure no longer needs a billing_model at all — deploys
+// with a fresh volume get correct pricing without anyone knowing which
+// model the owner will load.
+func (h *Handler) generateModelSlug() string {
+	if h.fleet != nil {
+		if n := h.fleet.Generate().ModelName(); n != "" {
+			return n
+		}
+	}
+	if h.cfg.BillingModel != "" {
+		return h.cfg.BillingModel
+	}
+	return h.cfg.ModelName
+}
+
 // AgentCatalog exposes the live agent catalogue so external goroutines
 // (e.g. the tool-spec puller in cmd/server) can mutate it via
 // Catalog.Replace. Returns nil when the agentic loop is disabled (no
@@ -662,7 +680,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
 			if id, in, out, ok := extractUsage(respBody); ok {
-				rep.Record(id, callerFromContext(r.Context()), "", in, out)
+				rep.Record(id, callerFromContext(r.Context()), h.generateModelSlug(), in, out)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -787,7 +805,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// from the forwarded stream so the response shape is unchanged.
 	var meter *meterCtx
 	if rep := h.billingReporter(); rep != nil {
-		meter = &meterCtx{reporter: rep, caller: callerFromContext(r.Context())}
+		meter = &meterCtx{reporter: rep, caller: callerFromContext(r.Context()), model: h.generateModelSlug()}
 		if reqParams.Stream {
 			clientHadUsage := false
 			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)

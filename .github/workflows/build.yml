@@ -85,8 +85,14 @@ jobs:
         id: manifest
         run: |
           if [ -f privasys.json ]; then
-            # Compact JSON to a single line for OCI label
-            echo "json=$(jq -c . privasys.json)" >> "$GITHUB_OUTPUT"
+            # Base64-encode the compact JSON. Raw JSON in the label value is
+            # NOT safe: docker/build-push-action parses `labels` values
+            # CSV-style, so any fully-quoted token between commas — e.g. the
+            # middle element of "required":["model","query","documents"] —
+            # loses its quotes and the label lands as invalid JSON (broke
+            # MCP-manifest detection for every v0.4.x image, 2026-07-16).
+            # The management-service accepts base64-encoded JSON natively.
+            echo "json=$(jq -c . privasys.json | base64 -w0)" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v7
         with:

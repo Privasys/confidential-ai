@@ -2,6 +2,7 @@ package models
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -158,5 +159,31 @@ func TestBuildVLLMArgs_ServedNameBasename(t *testing.T) {
 
 	if got := flagValue(args, "--served-model-name"); got != "qwen36-35b-a3b-fp8" {
 		t.Fatalf("served name must strip path: got %q", got)
+	}
+}
+
+func TestStderrTailSuffix(t *testing.T) {
+	m := NewManager(TaskGenerate, "/models", 8000, "", "")
+
+	if got := m.stderrTailSuffix(); got != "" {
+		t.Fatalf("empty ring must yield empty suffix, got %q", got)
+	}
+
+	m.stderrTail = []string{
+		"(EngineCore pid=1093)   File \"engine.py\", line 12",
+		"(EngineCore pid=1093)     raise ValueError(",
+		"(EngineCore pid=1093) ValueError: To serve at least one request with the model's max seq len (32768), 3.5 GiB KV cache is needed",
+		"(APIServer pid=976) RuntimeError: Engine core initialization failed. See root cause above.",
+		"",
+	}
+	got := m.stderrTailSuffix()
+	if got == "" || !strings.Contains(got, "Engine core initialization failed") {
+		t.Fatalf("expected the most recent error line, got %q", got)
+	}
+
+	// No error-looking lines: fall back to the last non-noise line.
+	m.stderrTail = []string{"INFO: loading weights", "INFO: waiting for engine"}
+	if got := m.stderrTailSuffix(); got != ": INFO: waiting for engine" {
+		t.Fatalf("fallback should be last non-noise line, got %q", got)
 	}
 }

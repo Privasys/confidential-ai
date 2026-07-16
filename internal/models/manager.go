@@ -203,6 +203,12 @@ type Manager struct {
 	// re-delivered identical configuration stays a no-op while a changed
 	// parameter set triggers a reload.
 	appliedReq LoadRequest
+
+	// stderrTail is a small ring of the most recent vLLM stderr lines,
+	// kept so a process death can surface the ACTUAL error (argparse
+	// failure, ValueError, OOM traceback) in the status document instead
+	// of a bare exit code.
+	stderrTail []string
 }
 
 // NewManager creates a new model manager for one task. stateFile may be
@@ -572,6 +578,16 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		// VLLM_USE_V1 intentionally NOT set: defaults to V1 in
 		// vLLM >= 0.19, which is what we want for throughput.
 	)
+	// Persist the JIT/compile caches across container recreations by
+	// homing vLLM on the encrypted volume when one is mounted. FlashInfer
+	// resolves its cache via expanduser("~/.cache/flashinfer") — HOME, not
+	// XDG — and a fresh container overlay otherwise pays the full
+	// per-architecture nvcc compile (~8 min for the Qwen GDN sm_90a
+	// kernels) on EVERY image upgrade/redeploy. Triton and HF caches ride
+	// along, all inside the LUKS volume, never on the host.
+	if info, statErr := os.Stat("/data"); statErr == nil && info.IsDir() {
+		cmd.Env = append(cmd.Env, "HOME=/data")
+	}
 	// Put vLLM + every worker it spawns in their own process group so
 	// Unload() can SIGKILL the whole tree at once via `kill -- -pgid`.
 	// Without this, vLLM EngineCore / ray workers survive Process.Kill
@@ -604,11 +620,22 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// Parse stderr for progress in background.
 	go m.parseProgress(stderr)
 
-	// Wait for vLLM to be ready.
-	if err := m.waitForReady(ctx); err != nil {
-		// Check if process is still alive.
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			m.setFailed("vLLM exited during startup: exit code " + fmt.Sprintf("%d", cmd.ProcessState.ExitCode()))
+	// Single owner of cmd.Wait: every consumer below reads waitCh, so the
+	// exit status is observed exactly once and the readiness loop can
+	// fail FAST on process death instead of waiting out its cap. Buffered
+	// so the goroutine never leaks if nobody reads.
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	// Wait for vLLM to be ready OR for the process to die.
+	if err := m.waitForReady(ctx, waitCh); err != nil {
+		if exitErr, died := err.(*vllmExitError); died {
+			// The process died: fail immediately with the REAL reason
+			// (last error lines off stderr), not a generic timeout N
+			// minutes later. On 2026-07-15 every engine death (argparse
+			// error, KV-floor ValueError, memcg OOM kill) hid behind
+			// "not ready after N minutes" for its full window.
+			m.setFailed(exitErr.Error())
 		} else {
 			m.setFailed("vLLM health check failed: " + err.Error())
 			// Kill the whole process GROUP, exactly like Unload: killing
@@ -623,7 +650,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 			} else {
 				_ = cmd.Process.Kill()
 			}
-			_ = cmd.Wait()
+			<-waitCh
 		}
 		return
 	}
@@ -651,15 +678,33 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	m.persistRequest(req)
 
 	// Wait for process exit (blocks until vLLM dies or is killed).
-	if err := cmd.Wait(); err != nil {
+	if err := <-waitCh; err != nil {
 		m.mu.Lock()
 		if m.state == StateReady {
-			// Unexpected crash.
+			// Unexpected crash: surface the stderr tail, not just the
+			// exit code.
 			m.state = StateFailed
-			m.loadErr = "vLLM process exited unexpectedly: " + err.Error()
+			m.loadErr = "vLLM process exited unexpectedly: " + err.Error() + m.stderrTailSuffix()
 		}
 		m.mu.Unlock()
 	}
+}
+
+// vllmExitError marks a readiness failure caused by the vLLM process
+// dying (as opposed to a health-check timeout). It carries the exit
+// status plus the most informative recent stderr lines so the operator
+// sees the actual Python/vLLM error in the status document.
+type vllmExitError struct {
+	waitErr error
+	tail    string
+}
+
+func (e *vllmExitError) Error() string {
+	msg := "vLLM exited during startup"
+	if e.waitErr != nil {
+		msg += " (" + e.waitErr.Error() + ")"
+	}
+	return msg + e.tail
 }
 
 // buildVLLMArgs translates a LoadRequest (with defaults already
@@ -828,6 +873,15 @@ func (m *Manager) parseProgress(r io.Reader) {
 		// Write to our stderr for logging.
 		fmt.Fprintln(os.Stderr, "[vllm]", line)
 
+		// Keep a short tail ring so a process death can report the real
+		// error instead of a bare exit code.
+		m.mu.Lock()
+		m.stderrTail = append(m.stderrTail, line)
+		if len(m.stderrTail) > 40 {
+			m.stderrTail = m.stderrTail[len(m.stderrTail)-40:]
+		}
+		m.mu.Unlock()
+
 		// Parse percentage progress.
 		if matches := progressPattern.FindStringSubmatch(line); len(matches) > 1 {
 			var pct float64
@@ -853,8 +907,10 @@ func (m *Manager) parseProgress(r io.Reader) {
 	}
 }
 
-// waitForReady polls vLLM /health until it returns 200 or context is cancelled.
-func (m *Manager) waitForReady(ctx context.Context) error {
+// waitForReady polls vLLM /health until it returns 200, the process
+// dies (waitCh fires → fail fast with a *vllmExitError carrying the
+// stderr tail), or the context is cancelled.
+func (m *Manager) waitForReady(ctx context.Context, waitCh chan error) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := fmt.Sprintf("http://localhost:%d/health", m.vllmPort)
 
@@ -893,6 +949,11 @@ func (m *Manager) waitForReady(ctx context.Context) error {
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "{\"level\":\"warn\",\"msg\":\"waitForReady cancelled\",\"task\":%q,\"iteration\":%d}\n", m.task, i)
 			return ctx.Err()
+		case waitErr := <-waitCh:
+			// The process is gone: give the stderr a beat to drain
+			// through parseProgress, then fail with the real reason.
+			time.Sleep(500 * time.Millisecond)
+			return &vllmExitError{waitErr: waitErr, tail: m.stderrTailSuffix()}
 		default:
 		}
 
@@ -999,6 +1060,42 @@ func (m *Manager) resolveHFCachePath(modelPath string) string {
 
 	// Return the last (most recent) snapshot.
 	return filepath.Join(snapDir, entries[len(entries)-1].Name())
+}
+
+// stderrTailSuffix returns a ": <reason>" suffix built from the most
+// informative recent stderr lines: prefer explicit error lines (the
+// vLLM ValueError / argparse / OOM message), fall back to the last
+// non-empty line. Empty when nothing was captured.
+func (m *Manager) stderrTailSuffix() string {
+	m.mu.RLock()
+	tail := make([]string, len(m.stderrTail))
+	copy(tail, m.stderrTail)
+	m.mu.RUnlock()
+
+	// Scan backwards for the most recent line that looks like the actual
+	// error, skipping traceback scaffolding.
+	isNoise := func(s string) bool {
+		t := strings.TrimSpace(s)
+		return t == "" || strings.HasPrefix(t, "File \"") ||
+			strings.HasPrefix(t, "Traceback") || strings.HasPrefix(t, "^")
+	}
+	for i := len(tail) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(tail[i])
+		if isNoise(t) {
+			continue
+		}
+		lower := strings.ToLower(t)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "out of memory") ||
+			strings.Contains(lower, "killed") || strings.Contains(lower, "exception") {
+			return ": " + t
+		}
+	}
+	for i := len(tail) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(tail[i]); !isNoise(t) {
+			return ": " + t
+		}
+	}
+	return ""
 }
 
 func (m *Manager) setFailed(errMsg string) {

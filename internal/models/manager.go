@@ -233,7 +233,11 @@ func (m *Manager) Task() Task { return m.task }
 
 // Upstream returns the base URL of this instance's vLLM server.
 func (m *Manager) Upstream() string {
-	return fmt.Sprintf("http://localhost:%d", m.vllmPort)
+	// 127.0.0.1, NOT localhost: the container /etc/hosts on the per-
+	// container network stack has no localhost entry, and Go resolves
+	// "localhost" via DNS → NXDOMAIN (found live on m5-dev-ai: every
+	// readiness poll failed against a serving vLLM for hours).
+	return fmt.Sprintf("http://127.0.0.1:%d", m.vllmPort)
 }
 
 // Status returns the current model manager status.
@@ -912,7 +916,7 @@ func (m *Manager) parseProgress(r io.Reader) {
 // stderr tail), or the context is cancelled.
 func (m *Manager) waitForReady(ctx context.Context, waitCh chan error) error {
 	client := &http.Client{Timeout: 5 * time.Second}
-	url := fmt.Sprintf("http://localhost:%d/health", m.vllmPort)
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", m.vllmPort)
 
 	m.mu.Lock()
 	m.message = "Waiting for vLLM to become ready..."

@@ -1336,7 +1336,7 @@ func (h *Handler) modelsUnload(w http.ResponseWriter, r *http.Request) {
 // method: the container declares its own attestation OIDs, and Caddy's RA-TLS
 // module pulls them at certificate issuance time.
 //
-// Serves OID 1.3.6.1.4.1.65230.3.5 (MODEL_DIGEST) when a model digest is
+// Serves OID 1.3.6.1.4.1.65230.3.5.5 (MODEL_DIGEST) when a model digest is
 // available. The digest is sourced, in order of preference:
 //
 //  1. The dm-verity root hash of the mounted model disk
@@ -1344,6 +1344,12 @@ func (h *Handler) modelsUnload(w http.ResponseWriter, r *http.Request) {
 //  2. The dynamic digest computed by the model manager from the
 //     safetensors index (legacy fallback).
 //  3. The static --model-digest config value.
+//
+// The digest is ALSO emitted at the legacy literal 3.5 during the migration:
+// deployed chat clients still pin the model digest there. Literal 3.5 is the
+// Mini runtime's configuration-hash slot, so an app-declared value does not
+// belong on it — drop the legacy emission once no live verifier checks 3.5
+// (then enclave images can reserve literal 3.5 entirely).
 func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) {
 	type entry struct {
 		OID   string `json:"oid"`
@@ -1365,6 +1371,12 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 	if digest != "" {
 		digestBytes, err := hex.DecodeString(digest)
 		if err == nil && len(digestBytes) > 0 {
+			exts = append(exts, entry{
+				OID:   "1.3.6.1.4.1.65230.3.5.5",
+				Value: base64.StdEncoding.EncodeToString(digestBytes),
+			})
+			// Legacy slot — see the function doc; remove once no live
+			// verifier pins the model digest at literal 3.5.
 			exts = append(exts, entry{
 				OID:   "1.3.6.1.4.1.65230.3.5",
 				Value: base64.StdEncoding.EncodeToString(digestBytes),

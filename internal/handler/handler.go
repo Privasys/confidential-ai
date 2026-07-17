@@ -1371,16 +1371,21 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 			})
 		}
 	}
-	// OID 1.3.6.1.4.1.65230.3.7 (TOOLS_DIGEST): sha256 over the
+	// OID 1.3.6.1.4.1.65230.3.5.7 (TOOLS_DIGEST): sha256 over the
 	// canonical, sorted JSON of the configured MCP servers (name,
 	// base_url, transport, auth_mode, audience, confirm). A verifier
 	// can recompute this from the management-service ai_tools rows
 	// to prove the container is exposing the expected toolset.
+	// Lives under the app arc 3.5.* — it is this app's own extension,
+	// not a platform-standard OID; top-level 3.x slots are reserved for
+	// manager-stamped extensions. (Emitted at the top-level 3.7 until
+	// fleet v0.4.x — enclave images from tdx-v0.2.56-dev drop any
+	// container-declared OID outside 3.5/3.5.* at issuance.)
 	if h.agentCatalog != nil {
 		if td := h.agentCatalog.ServersDigest(); td != "" {
 			if tdBytes, err := hex.DecodeString(td); err == nil && len(tdBytes) > 0 {
 				exts = append(exts, entry{
-					OID:   "1.3.6.1.4.1.65230.3.7",
+					OID:   "1.3.6.1.4.1.65230.3.5.7",
 					Value: base64.StdEncoding.EncodeToString(tdBytes),
 				})
 			}

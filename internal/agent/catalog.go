@@ -290,7 +290,7 @@ func (c *Catalog) Servers() []Server {
 // ServersDigest is the canonical sha256 over the configured server set
 // (sorted by name; only the security-relevant fields contribute). The
 // hex-encoded result is bound into RA-TLS attestation extension OID
-// 1.3.6.1.4.1.65230.3.7 so a verifier can prove which tool servers the
+// 1.3.6.1.4.1.65230.3.5.7 so a verifier can prove which tool servers the
 // confidential-ai container was configured to talk to.
 func (c *Catalog) ServersDigest() string {
 	servers := c.Servers()

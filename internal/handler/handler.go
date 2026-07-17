@@ -75,8 +75,8 @@ type Handler struct {
 
 	// oidcVerifier is non-nil when OIDCIssuer is configured. It validates
 	// platform bearer tokens offline (JWKS) so privileged endpoints
-	// (model load/unload) can require the manager role, mirroring the
-	// enclave manager's own auth model.
+	// (model load/unload) can owner-gate on this app's config role, mirroring
+	// the enclave manager's own configure-authz gate.
 	oidcVerifier *OIDCVerifier
 
 	// revoked, when non-nil, is the polled set of revoked session ids. An
@@ -158,7 +158,7 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	}
 	if cfg.OIDCIssuer != "" {
 		h.oidcVerifier = NewOIDCVerifier(cfg.OIDCIssuer, cfg.OIDCAudience)
-		log.Printf("[auth] OIDC load/unload gate enabled (issuer=%s, role=%s)", cfg.OIDCIssuer, cfg.ManagerRole)
+		log.Printf("[auth] OIDC load/unload gate enabled — owner-gated (issuer=%s, app=%s)", cfg.OIDCIssuer, cfg.AppID)
 		revokedURL := cfg.RevokedSidsURL
 		if revokedURL == "" {
 			revokedURL = strings.TrimRight(cfg.OIDCIssuer, "/") + "/sessions/revoked"
@@ -351,14 +351,39 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 // requireLoadAuth gates model load/unload. Authorisation order:
 //
 //  1. When an OIDC verifier is configured (the default), the caller must
-//     present a platform bearer carrying the manager role. This is what the
-//     management-service service account presents, and mirrors the enclave
-//     manager's own auth model, so no per-app shared secret is needed.
-//  2. A non-empty static LoadToken is accepted as a LEGACY FALLBACK for the
-//     direct CLI/owner path during migration.
+//     present a platform bearer carrying this app's owner or admin config role
+//     (loadRoles) — model load/unload is this app's configure surface and is
+//     owner-gated like every other app's configure (the configure-authz
+//     standard). The owner drives it from the CLI/portal on their own bearer.
+//  2. A non-empty static LoadToken is accepted as a LEGACY break-glass fallback.
 //  3. When neither is configured the endpoint is open (dev mode).
 //
-// The end user never holds either credential; load/unload is manager-only.
+// loadRoles is the set of roles that authorise model load/unload: this app's
+// per-app owner and admin config roles, so load/unload is owner-gated exactly
+// like every other app's configure (the configure-authz standard — the owner
+// drives it from the CLI/portal on their own platform bearer). The roles are
+// keyed on the canonical hex app id — the same encoding the IdP pins
+// ([0-9a-f]{32}) and OID 3.6 uses — built from AppID (PRIVASYS_APP_ID, a
+// hyphenated UUID). Returns nil when no app id is injected, which fails closed.
+func (h *Handler) loadRoles() []string {
+	hexID := strings.ReplaceAll(h.cfg.AppID, "-", "")
+	if hexID == "" {
+		return nil
+	}
+	// The app-role prefix is the platform audience — an IdP-wide constant, not
+	// this app's token-aud check. Mirror the management-service's platformAudience
+	// exactly (first OIDC_AUDIENCE, else "privasys-platform") so the role we build
+	// is byte-identical to the one the IdP grants.
+	aud := h.cfg.OIDCAudience
+	if aud == "" {
+		aud = "privasys-platform"
+	}
+	return []string{
+		aud + ":app:" + hexID + ":owner",
+		aud + ":app:" + hexID + ":admin",
+	}
+}
+
 func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.oidcVerifier == nil && h.cfg.LoadToken == "" {
@@ -375,11 +400,17 @@ func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
 		if h.oidcVerifier != nil {
 			claims, err := h.oidcVerifier.Verify(r.Context(), token)
 			if err == nil {
-				if claims.HasRole(h.cfg.ManagerRole) {
-					next(w, r)
-					return
+				// Model load/unload IS this app's configure surface, so it is
+				// owner-gated like every other app (the configure-authz
+				// standard): the caller's platform bearer carries
+				// <audience>:app:<hex>:owner|admin for THIS app.
+				for _, role := range h.loadRoles() {
+					if claims.HasRole(role) {
+						next(w, r)
+						return
+					}
 				}
-				writeError(w, http.StatusForbidden, "requires "+h.cfg.ManagerRole+" role")
+				writeError(w, http.StatusForbidden, "requires the app owner/admin role for this app")
 				return
 			}
 			// OIDC verification failed: fall back to the legacy static token.

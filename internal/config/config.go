@@ -41,26 +41,29 @@ type Config struct {
 
 	// LoadToken, when non-empty, is accepted as a Bearer credential on
 	// POST /v1/models/load and POST /v1/models/unload. It is now a LEGACY
-	// FALLBACK for the direct CLI/owner path: the primary gate is the
-	// OIDC manager role (see OIDCIssuer/ManagerRole). When both LoadToken
-	// and OIDCIssuer are empty the endpoints remain open (dev mode).
+	// FALLBACK for a direct break-glass path: the primary gate is the app's
+	// per-app owner/admin config role (see AppID). When both LoadToken and
+	// OIDCIssuer are empty the endpoints remain open (dev mode).
 	LoadToken string
 
 	// OIDCIssuer is the platform OIDC issuer whose JWKS validates bearer
 	// tokens on privileged endpoints. When non-empty, /v1/models/{load,
-	// unload} require a token from this issuer carrying ManagerRole (the
-	// management-service service account presents exactly such a token).
-	// This mirrors the enclave manager's own auth model. env: OIDC_ISSUER.
+	// unload} require a token from this issuer carrying this app's owner or
+	// admin config role (the app owner, driving configure from the CLI/portal).
+	// This mirrors the enclave manager's own configure-authz gate.
+	// env: OIDC_ISSUER.
 	OIDCIssuer string
 
 	// OIDCAudience, when non-empty, is the required `aud` on a verified
 	// token. Empty skips the audience check. env: OIDC_AUDIENCE.
 	OIDCAudience string
 
-	// ManagerRole is the role a token must carry (in the `roles` claim)
-	// to load/unload models. Default: privasys-platform:manager.
-	// env: MANAGER_ROLE.
-	ManagerRole string
+	// AppID is this app's platform id (apps.id, a UUID), injected by the
+	// enclave launcher as PRIVASYS_APP_ID. It builds this app's per-app config
+	// roles so model load/unload is OWNER-gated like every other app's
+	// configure (the configure-authz standard). Empty fails closed on the OIDC
+	// path (only the LoadToken break-glass remains). env: PRIVASYS_APP_ID.
+	AppID string
 
 	// RevokedSidsURL is the IdP feed of revoked session ids that the proxy
 	// polls so a revoked API key (a token whose sid was revoked) is rejected
@@ -222,13 +225,13 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&cfg.StateFile, "state-file", envOr("STATE_FILE", "/data/last-load.json"),
 		"Path where the last successful Load request is persisted for auto-restore on restart (env: STATE_FILE; empty disables)")
 	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
-		"Legacy fallback bearer accepted on /v1/models/{load,unload} alongside the OIDC manager role (env: LOAD_TOKEN)")
+		"Legacy break-glass bearer accepted on /v1/models/{load,unload} alongside the app owner/admin role (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.OIDCIssuer, "oidc-issuer", envOr("OIDC_ISSUER", "https://privasys.id"),
-		"Platform OIDC issuer whose JWKS validates end-user (inference) and manager (load/unload) bearer tokens. Inference authentication is mandatory, so an empty issuer leaves no way to authenticate callers and rejects all inference with 401 (env: OIDC_ISSUER)")
+		"Platform OIDC issuer whose JWKS validates end-user (inference) and owner (load/unload) bearer tokens. Inference authentication is mandatory, so an empty issuer leaves no way to authenticate callers and rejects all inference with 401 (env: OIDC_ISSUER)")
 	fs.StringVar(&cfg.OIDCAudience, "oidc-audience", envOr("OIDC_AUDIENCE", ""),
 		"Required aud on a verified token; empty skips the audience check (env: OIDC_AUDIENCE)")
-	fs.StringVar(&cfg.ManagerRole, "manager-role", envOr("MANAGER_ROLE", "privasys-platform:manager"),
-		"Role required on /v1/models/{load,unload} tokens (env: MANAGER_ROLE)")
+	fs.StringVar(&cfg.AppID, "app-id", envOr("PRIVASYS_APP_ID", ""),
+		"This app's platform id (apps.id); required to owner-gate model load/unload (env: PRIVASYS_APP_ID)")
 	fs.StringVar(&cfg.RevokedSidsURL, "revoked-sids-url", envOr("REVOKED_SIDS_URL", ""),
 		"IdP revoked-session feed to poll; empty derives <OIDC_ISSUER>/sessions/revoked (env: REVOKED_SIDS_URL)")
 	fs.DurationVar(&cfg.RevokedSidsInterval, "revoked-sids-interval", envDuration("REVOKED_SIDS_INTERVAL", 60*time.Second),

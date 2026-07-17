@@ -67,7 +67,7 @@ func jwksTestIDP(t *testing.T) (issuer string, mint func(claims map[string]any) 
 	return srv.URL, mint
 }
 
-func TestOIDCVerifier_ManagerRole(t *testing.T) {
+func TestOIDCVerifier_HasRole(t *testing.T) {
 	issuer, mint := jwksTestIDP(t)
 	v := NewOIDCVerifier(issuer, "")
 	tok := mint(map[string]any{
@@ -102,34 +102,36 @@ func TestOIDCVerifier_RejectsWrongIssuerAndExpiry(t *testing.T) {
 	}
 }
 
-func TestRequireLoadAuth_OIDCManager(t *testing.T) {
+func TestRequireLoadAuth_OwnerGated(t *testing.T) {
 	issuer, mint := jwksTestIDP(t)
+	const appID = "3a545cb7-740e-4d31-839b-7341359631a2"
+	const ownerRole = "privasys-platform:app:3a545cb7740e4d31839b7341359631a2:owner"
 	h := &Handler{
-		cfg:          &config.Config{ManagerRole: "privasys-platform:manager", OIDCIssuer: issuer},
+		cfg:          &config.Config{OIDCIssuer: issuer, OIDCAudience: "privasys-platform", AppID: appID},
 		oidcVerifier: NewOIDCVerifier(issuer, ""),
 	}
 	called := false
 	gate := h.requireLoadAuth(func(http.ResponseWriter, *http.Request) { called = true })
 
-	// Manager token → allowed.
-	tok := mint(map[string]any{"iss": issuer, "sub": "svc", "exp": float64(time.Now().Add(time.Hour).Unix()), "roles": []string{"privasys-platform:manager"}})
+	// App owner token → allowed.
+	tok := mint(map[string]any{"iss": issuer, "sub": "u", "exp": float64(time.Now().Add(time.Hour).Unix()), "roles": []string{ownerRole}})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/models/load", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	gate(rec, req)
 	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("manager rejected: called=%v code=%d", called, rec.Code)
+		t.Fatalf("owner rejected: called=%v code=%d", called, rec.Code)
 	}
 
-	// Non-manager token → 403.
+	// The old manager role no longer grants access → 403.
 	called = false
-	weak := mint(map[string]any{"iss": issuer, "sub": "u", "exp": float64(time.Now().Add(time.Hour).Unix()), "roles": []string{"privasys-platform:monitoring"}})
+	weak := mint(map[string]any{"iss": issuer, "sub": "svc", "exp": float64(time.Now().Add(time.Hour).Unix()), "roles": []string{"privasys-platform:manager"}})
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/v1/models/load", nil)
 	req.Header.Set("Authorization", "Bearer "+weak)
 	gate(rec, req)
 	if called || rec.Code != http.StatusForbidden {
-		t.Fatalf("non-manager not forbidden: called=%v code=%d", called, rec.Code)
+		t.Fatalf("non-owner not forbidden: called=%v code=%d", called, rec.Code)
 	}
 
 	// No token → 401.
@@ -252,7 +254,7 @@ func TestAuthorizeInference(t *testing.T) {
 func TestRequireLoadAuth_OIDCConfiguredLegacyFallback(t *testing.T) {
 	issuer, _ := jwksTestIDP(t)
 	h := &Handler{
-		cfg:          &config.Config{ManagerRole: "privasys-platform:manager", OIDCIssuer: issuer, LoadToken: "s3cret"},
+		cfg:          &config.Config{OIDCIssuer: issuer, AppID: "3a545cb7-740e-4d31-839b-7341359631a2", LoadToken: "s3cret"},
 		oidcVerifier: NewOIDCVerifier(issuer, ""),
 	}
 	called := false

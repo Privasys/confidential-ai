@@ -893,8 +893,12 @@ func (m *Manager) parseProgress(r io.Reader) {
 		// error instead of a bare exit code.
 		m.mu.Lock()
 		m.stderrTail = append(m.stderrTail, line)
-		if len(m.stderrTail) > 40 {
-			m.stderrTail = m.stderrTail[len(m.stderrTail)-40:]
+		// Keep enough lines to reach past a Python traceback to the actual engine
+		// error: vLLM's "Engine core initialization failed. See root cause above."
+		// is the tail of a long API-server traceback, and the EngineCore child's
+		// real exception is many lines earlier in the same stream.
+		if len(m.stderrTail) > 400 {
+			m.stderrTail = m.stderrTail[len(m.stderrTail)-400:]
 		}
 		m.mu.Unlock()
 

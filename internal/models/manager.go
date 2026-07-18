@@ -169,6 +169,12 @@ type Status struct {
 	Message     string  `json:"message,omitempty"`     // human-readable status
 	ElapsedSec  float64 `json:"elapsed_s,omitempty"`
 	Error       string  `json:"error,omitempty"`
+	// StderrTail is the recent vLLM stderr (up to the last 40 lines), surfaced
+	// ONLY on failure. The Error field carries a single best-guess line; the real
+	// root cause of a startup crash ("...See root cause above") is usually an
+	// earlier line, so an owner debugging a failed load needs the whole tail —
+	// production enclaves have no shell or journal to read it any other way.
+	StderrTail []string `json:"stderr_tail,omitempty"`
 }
 
 // Manager manages one vLLM subprocess lifecycle (one task, one port).
@@ -261,6 +267,12 @@ func (m *Manager) Status() Status {
 		s.Error = m.loadErr
 		if !m.loadStart.IsZero() {
 			s.ElapsedSec = time.Since(m.loadStart).Seconds()
+		}
+		// Surface the full stderr ring so the actual root cause is readable via
+		// the API (copied under the lock we already hold — do not call
+		// stderrTailSuffix here, it re-acquires m.mu).
+		if len(m.stderrTail) > 0 {
+			s.StderrTail = append([]string(nil), m.stderrTail...)
 		}
 	case StateReady:
 		s.Message = "Model loaded and serving"

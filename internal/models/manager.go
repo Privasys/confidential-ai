@@ -593,6 +593,17 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		"PYTHONHASHSEED=0",
 		// VLLM_USE_V1 intentionally NOT set: defaults to V1 in
 		// vLLM >= 0.19, which is what we want for throughput.
+		//
+		// Bound the FlashInfer/Triton JIT compile fan-out. Uncapped, the
+		// MoE kernel build launches one cicc per core (26 on the H100
+		// shape) at 3-6 GB each — enough to stall the whole host in
+		// reclaim (or, under a memcg, OOM it). MAX_JOBS gates ninja /
+		// torch cpp_extension builds; NVCC_THREADS gates per-invocation
+		// nvcc parallelism; FLASHINFER_JIT_MAX_WORKERS gates FlashInfer's
+		// own pool on versions that support it.
+		"MAX_JOBS=6",
+		"NVCC_THREADS=2",
+		"FLASHINFER_JIT_MAX_WORKERS=6",
 	)
 	// Persist the JIT/compile caches across container recreations by
 	// homing vLLM on the encrypted volume when one is mounted. FlashInfer
@@ -621,7 +632,15 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		m.setFailed("failed to create stderr pipe: " + err.Error())
 		return
 	}
-	cmd.Stdout = os.Stdout // let vLLM stdout pass through
+	// vLLM stdout is drained into the same ring as stderr — NEVER wired to
+	// our own stdout. The process stdout is the container's log FIFO; the
+	// 35B's startup flood can fill it and block every writer in the
+	// container (see parseProgress).
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		m.setFailed("failed to create stdout pipe: " + err.Error())
+		return
+	}
 
 	m.mu.Lock()
 	m.cmd = cmd
@@ -633,8 +652,10 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		return
 	}
 
-	// Parse stderr for progress in background.
+	// Parse both streams for progress/tail in background. parseProgress
+	// appends to the shared ring under m.mu, so two scanners are safe.
 	go m.parseProgress(stderr)
+	go m.parseProgress(stdout)
 
 	// Single owner of cmd.Wait: every consumer below reads waitCh, so the
 	// exit status is observed exactly once and the readiness loop can
@@ -886,8 +907,13 @@ func (m *Manager) parseProgress(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Write to our stderr for logging.
-		fmt.Fprintln(os.Stderr, "[vllm]", line)
+		// Deliberately NOT re-emitted to our own stdout/stderr: those are
+		// the container's log FIFOs, and the 35B floods tens of MB at
+		// startup. If the host-side drain ever stalls, the FIFO fills and
+		// every subsequent write to it BLOCKS — including the HTTP
+		// handlers' log lines, wedging the whole proxy (observed on
+		// m2-tdx-gpu, 2026-07-19). vLLM output lives only in the tail
+		// ring, surfaced via /v1/models/status.
 
 		// Keep a short tail ring so a process death can report the real
 		// error instead of a bare exit code.

@@ -61,12 +61,30 @@ func callerFromContext(ctx context.Context) string {
 	return ""
 }
 
+// relaySubHeader is the wallet-authenticated subject the enclave-os
+// session relay asserts toward the app on sealed-transport requests
+// (sessionrelay.Middleware). The relay strips any inbound value on every
+// path — terminate-leg and RA-TLS-direct alike — before setting its own,
+// and the container only receives traffic through the relay, so a
+// non-empty value here is always relay-set and carries an
+// EncAuth-verified wallet identity. This is the platform's sealed-caller
+// convention (chat-service and Drive authenticate the same way): the
+// browser's bearer deliberately never crosses the gateway's terminate
+// leg, so a sealed request carries NO token — without honouring this
+// header, mandatory inference auth 401s every sealed chat turn.
+const relaySubHeader = "X-Privasys-Sub"
+
 // resolveCaller extracts the end-user credential from X-App-Auth (the proxied
 // path, forwarded by the management-service) or the Authorization bearer (a
 // direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
 // returns its subject. Returns ("", nil) when no credential is present and
 // ("", err) when a credential is present but invalid. A platform API key is just
 // a long-lived signed token, so it verifies through the same path.
+//
+// Sealed-transport requests carry no token at all; for those the
+// relay-asserted subject (relaySubHeader) is the caller. An explicit token
+// always takes precedence — a caller presenting an invalid or revoked token
+// is rejected, never silently downgraded to the relay identity.
 func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 	tok := strings.TrimSpace(r.Header.Get("X-App-Auth"))
 	if tok == "" {
@@ -75,6 +93,9 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		}
 	}
 	if tok == "" {
+		if sub := strings.TrimSpace(r.Header.Get(relaySubHeader)); sub != "" {
+			return sub, nil // sealed transport: wallet-vouched, relay-asserted
+		}
 		return "", nil // anonymous
 	}
 	if h.oidcVerifier == nil {

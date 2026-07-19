@@ -201,6 +201,45 @@ func TestResolveCaller(t *testing.T) {
 	}
 }
 
+func TestResolveCaller_SealedRelaySub(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	// Sealed-transport path: no token, relay-asserted subject → the caller.
+	// Without this, mandatory inference auth 401s every sealed chat turn
+	// (the browser's bearer deliberately never crosses the terminate leg).
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(relaySubHeader, "wallet-sub-1")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "wallet-sub-1" {
+		t.Fatalf("relay sub: sub=%q err=%v", sub, err)
+	}
+
+	// An explicit token takes precedence over the relay sub — and an
+	// INVALID token must reject, never silently downgrade to the relay
+	// identity (keeps revocation meaningful).
+	tok := mint(map[string]any{"iss": issuer, "sub": "token-user", "exp": float64(time.Now().Add(time.Hour).Unix())})
+	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(relaySubHeader, "wallet-sub-1")
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if sub, err := h.resolveCaller(r); err != nil || sub != "token-user" {
+		t.Fatalf("token precedence: sub=%q err=%v", sub, err)
+	}
+	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(relaySubHeader, "wallet-sub-1")
+	r.Header.Set("Authorization", "Bearer not.a.jwt")
+	if sub, err := h.resolveCaller(r); err == nil || sub != "" {
+		t.Fatalf("bad token must not fall back to relay sub: sub=%q err=%v", sub, err)
+	}
+
+	// authorizeInference end-to-end: sealed caller is admitted and attributed.
+	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(relaySubHeader, "wallet-sub-1")
+	r2, ok := h.authorizeInference(httptest.NewRecorder(), r)
+	if !ok || callerFromContext(r2.Context()) != "wallet-sub-1" {
+		t.Fatalf("sealed authorize: ok=%v caller=%q", ok, callerFromContext(r2.Context()))
+	}
+}
+
 func TestResolveCaller_RejectsRevokedSid(t *testing.T) {
 	issuer, mint := jwksTestIDP(t)
 	h := &Handler{

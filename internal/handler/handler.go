@@ -112,6 +112,25 @@ type Handler struct {
 
 // New creates a Handler with the given config and model fleet.
 // If fleet is nil, falls back to legacy mode (polling vLLM at startup).
+// driveServerFromConfig builds the built-in Privasys Drive MCP tool server
+// (§8.7 RAG-in-enclave) when DriveMCPURL is configured, or nil to disable it.
+// Drive speaks the privasys_http MCP shape and authenticates the assistant
+// path with the interim shared secret; the acting user is asserted per call
+// via X-Privasys-On-Behalf-Of.
+func driveServerFromConfig(cfg *config.Config) *agent.Server {
+	if cfg.DriveMCPURL == "" {
+		return nil
+	}
+	return &agent.Server{
+		Name:           "drive",
+		BaseURL:        strings.TrimRight(cfg.DriveMCPURL, "/"),
+		Transport:      agent.TransportPrivasysHTTP,
+		AuthMode:       agent.AuthModeAssistant,
+		AssistantToken: cfg.DriveAssistantToken,
+		ExpectedDigest: cfg.DriveExpectedDigest,
+	}
+}
+
 func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	h := &Handler{
 		cfg:   cfg,
@@ -124,8 +143,13 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	if fleet == nil && cfg.ModelName != "" {
 		go h.pollUpstreamReady()
 	}
-	if servers, err := agent.ParseServerSpec(cfg.MCPServers); err != nil {
-		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", err)
+	servers, specErr := agent.ParseServerSpec(cfg.MCPServers)
+	driveSrv := driveServerFromConfig(cfg)
+	if driveSrv != nil {
+		servers = append(servers, *driveSrv)
+	}
+	if specErr != nil {
+		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", specErr)
 	} else if len(servers) > 0 || cfg.ToolSpecURL != "" || cfg.ToolGrantJWKSURL != "" {
 		// The catalogue is always created when the puller is enabled,
 		// even if the static MCP_SERVERS is empty: the puller will
@@ -140,7 +164,12 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 		catClient := &http.Client{Timeout: 15 * time.Second}
 		dispClient := &http.Client{Timeout: 60 * time.Second}
 		if cfg.MCPRATLS {
-			rt := agent.NewRATLSTransport()
+			var rt http.RoundTripper = agent.NewRATLSTransport()
+			// Pin the built-in Drive server to its attested digest on the
+			// shared transport (other hosts pass through unpinned).
+			if driveSrv != nil && driveSrv.ExpectedDigest != "" {
+				rt = agent.PinnedEnclaveTransport(rt, []agent.Server{*driveSrv})
+			}
 			catClient.Transport = rt
 			dispClient.Transport = rt
 		}

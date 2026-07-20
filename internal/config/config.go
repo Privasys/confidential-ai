@@ -132,6 +132,19 @@ type Config struct {
 	// this instance's id. Empty skips the audience check (dev only).
 	ToolGrantAudience string
 
+	// Drive RAG (§8.7 RAG-in-enclave): when DriveMCPURL is set, Privasys
+	// Drive is registered as a built-in MCP tool server so the agent can
+	// search the signed-in user's Drive (memory, semantic search, section /
+	// file reads). Calls go over attested RA-TLS pinned to
+	// DriveExpectedDigest, carrying `Authorization: Assistant
+	// <DriveAssistantToken>` and the caller's sub in X-Privasys-On-Behalf-Of.
+	// DriveAssistantToken is the interim shared secret matching Drive's
+	// assistant_enclave_token; it is replaced by inbound mutual RA-TLS
+	// later. Empty DriveMCPURL disables the built-in.
+	DriveMCPURL         string
+	DriveAssistantToken string
+	DriveExpectedDigest string
+
 	// CORSOrigins is a comma-separated allowlist of HTTP Origins that
 	// receive Access-Control-Allow-* response headers. Defaults to the
 	// Privasys chat front-ends. Empty disables CORS entirely (browser
@@ -240,6 +253,12 @@ func Parse(args []string) (*Config, error) {
 		"Carry MCP tool calls over per-request attested RA-TLS to the tool enclaves; disable only for local dev against plain-HTTP servers (env: MCP_RATLS)")
 	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
 		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
+	fs.StringVar(&cfg.DriveMCPURL, "drive-mcp-url", envOr("DRIVE_MCP_URL", ""),
+		"Privasys Drive base URL to register as a built-in RAG tool server (§8.7); empty disables it (env: DRIVE_MCP_URL)")
+	fs.StringVar(&cfg.DriveAssistantToken, "drive-assistant-token", envOr("DRIVE_ASSISTANT_TOKEN", ""),
+		"Interim shared secret sent as `Authorization: Assistant <token>` to Drive (matches its assistant_enclave_token) (env: DRIVE_ASSISTANT_TOKEN)")
+	fs.StringVar(&cfg.DriveExpectedDigest, "drive-expected-digest", envOr("DRIVE_EXPECTED_DIGEST", ""),
+		"Attested workload digest (OID 3.2 hex) to pin Drive's enclave on the RA-TLS dial (env: DRIVE_EXPECTED_DIGEST)")
 	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),
 		"When set, the proxy polls this URL for {spec,generation} and hot-reloads the tool catalogue (env: TOOL_SPEC_URL)")
 	fs.StringVar(&cfg.ToolSpecToken, "tool-spec-token", envOr("TOOL_SPEC_TOKEN", ""),

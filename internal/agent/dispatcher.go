@@ -76,6 +76,7 @@ func (d *Dispatcher) Call(ctx context.Context, qualifiedName string, args json.R
 	if d.authHeader(srv, bearer) != "" {
 		req.Header.Set("Authorization", d.authHeader(srv, bearer))
 	}
+	applyExtraToolHeaders(req.Header, srv, ctx)
 
 	resp, err := d.client.Do(req)
 	if err != nil {
@@ -155,8 +156,42 @@ func (d *Dispatcher) authHeader(srv Server, bearer string) string {
 			return ""
 		}
 		return "Bearer " + srv.StaticBearer
+	case AuthModeAssistant:
+		if srv.AssistantToken == "" {
+			return ""
+		}
+		return "Assistant " + srv.AssistantToken
 	default:
 		return ""
+	}
+}
+
+// onBehalfOfKey carries the acting end-user's sub through the dispatch
+// context so the assistant path (§8.7 RAG-in-enclave) can name the user to
+// Drive without changing Call's signature.
+type onBehalfOfKey struct{}
+
+// WithOnBehalfOf returns ctx carrying the acting user's sub, read back on
+// the assistant tool path.
+func WithOnBehalfOf(ctx context.Context, sub string) context.Context {
+	if sub == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, onBehalfOfKey{}, sub)
+}
+
+func onBehalfOfFromCtx(ctx context.Context) string {
+	sub, _ := ctx.Value(onBehalfOfKey{}).(string)
+	return sub
+}
+
+// applyExtraToolHeaders sets non-Authorization headers a server's auth mode
+// requires. For the assistant path that is X-Privasys-On-Behalf-Of.
+func applyExtraToolHeaders(h http.Header, srv Server, ctx context.Context) {
+	if srv.effectiveAuthMode() == AuthModeAssistant {
+		if sub := onBehalfOfFromCtx(ctx); sub != "" {
+			h.Set("X-Privasys-On-Behalf-Of", sub)
+		}
 	}
 }
 
@@ -164,12 +199,14 @@ func (d *Dispatcher) authHeader(srv Server, bearer string) string {
 func (d *Dispatcher) callSSE(ctx context.Context, qualifiedName string, srv Server, tool string, args json.RawMessage, bearer string, started time.Time) ToolResult {
 	cli := d.catalog.sseClient(srv)
 	hp := func() http.Header {
-		auth := d.authHeader(srv, bearer)
-		if auth == "" {
+		h := http.Header{}
+		if auth := d.authHeader(srv, bearer); auth != "" {
+			h.Set("Authorization", auth)
+		}
+		applyExtraToolHeaders(h, srv, ctx)
+		if len(h) == 0 {
 			return nil
 		}
-		h := http.Header{}
-		h.Set("Authorization", auth)
 		return h
 	}
 	res, err := cli.CallTool(ctx, tool, args, hp)

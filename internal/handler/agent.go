@@ -241,9 +241,10 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 	}
 
 	finalBody, results, err := agent.Run(r.Context(), disp, body, agent.LoopOptions{
-		Bearer:    bearer,
-		EmitEvent: emit,
-		Invoke:    invoke,
+		Bearer:     bearer,
+		OnBehalfOf: callerFromContext(r.Context()),
+		EmitEvent:  emit,
+		Invoke:     invoke,
 		WaitConsent: func(ctx context.Context, callID, name string, args []byte) (bool, error) {
 			if h.agentConsent == nil {
 				// Consent registry not initialised; default to allow so

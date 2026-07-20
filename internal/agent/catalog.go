@@ -46,6 +46,11 @@ const (
 	AuthModeExchange = "exchange" // mint via /api/v1/internal/token-exchange
 	AuthModeStatic   = "static"   // inject from StaticBearer
 	AuthModeNone     = "none"     // send no Authorization header
+	// AuthModeAssistant is the §8.7 RAG-in-enclave path to Privasys Drive:
+	// the call carries `Authorization: Assistant <AssistantToken>` plus an
+	// `X-Privasys-On-Behalf-Of: <sub>` header naming the end user, so Drive
+	// runs its read-only, AI-scoped RAG surface for that user.
+	AuthModeAssistant = "assistant"
 )
 
 // Server describes a single upstream MCP server the proxy talks to.
@@ -81,6 +86,11 @@ type Server struct {
 
 	// StaticBearer is the literal token sent when AuthMode == "static".
 	StaticBearer string
+
+	// AssistantToken is the shared secret sent as `Authorization: Assistant
+	// <token>` when AuthMode == "assistant" (§8.7 RAG-in-enclave, interim
+	// gate). Paired with the acting user's sub in X-Privasys-On-Behalf-Of.
+	AssistantToken string
 
 	// BearerForward is the legacy flag that maps to AuthMode == forward.
 	// Kept so existing MCP_SERVERS env strings still work; new code
@@ -237,8 +247,8 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 	}
 
 	var (
-		all  []Tool
-		errs []string
+		all   []Tool
+		errs  []string
 		anyOK bool
 	)
 	for _, s := range c.servers {

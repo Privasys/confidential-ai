@@ -22,6 +22,12 @@ type LoopOptions struct {
 	// "Bearer " prefix). Forwarded to MCP servers that opted in.
 	Bearer string
 
+	// OnBehalfOf is the verified end-user subject. Carried to the assistant
+	// tool path (§8.7 RAG-in-enclave) as X-Privasys-On-Behalf-Of so Drive
+	// runs its AI-scoped RAG surface for this user. Empty on anonymous or
+	// non-sealed paths.
+	OnBehalfOf string
+
 	// MaxIterations overrides the default cap. Zero means use MaxIterations.
 	MaxIterations int
 
@@ -66,6 +72,8 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 	if maxIter <= 0 {
 		maxIter = MaxIterations
 	}
+	// Carry the acting user's sub to the assistant tool path (§8.7).
+	ctx = WithOnBehalfOf(ctx, opt.OnBehalfOf)
 
 	// Decode once to a generic map; we mutate `messages` between rounds.
 	var req map[string]any

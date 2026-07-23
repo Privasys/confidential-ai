@@ -43,6 +43,13 @@ type Fleet struct {
 	// (waiting for an earlier instance in the order). Status surfaces
 	// them as loading with an explanatory message.
 	queued map[Task]string
+	// seqDone closes when the most-recently-spawned sequence goroutine
+	// exits. Each new sequence WAITS on its predecessor before touching
+	// any Manager, so two sequences can never interleave loads — the
+	// 2026-07-23 dev incident had a boot-restore sequence and an owner
+	// configure racing, which let a pooling engine profile its memory
+	// while the chat engine was mid-warmup (KV check read -9.02 GiB).
+	seqDone chan struct{}
 }
 
 // taskOrder is the load sequence: main model first (see VRAM plan).
@@ -138,9 +145,22 @@ func (f *Fleet) Apply(reqs map[Task]LoadRequest, declarative bool) error {
 			delete(f.queued, task)
 		}
 	}
+	// Single-flight: chain onto the previous sequence goroutine. The
+	// predecessor aborts at its next step boundary (superseded via seq),
+	// and this sequence starts only once it has fully exited, so Manager
+	// calls from two sequences never interleave.
+	prev := f.seqDone
+	done := make(chan struct{})
+	f.seqDone = done
 	f.mu.Unlock()
 
-	go f.runSequence(seq, reqs, unloads)
+	go func() {
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		f.runSequence(seq, reqs, unloads)
+	}()
 	return nil
 }
 
@@ -171,9 +191,11 @@ func (f *Fleet) runSequence(seq int, reqs map[Task]LoadRequest, unloads []Task) 
 		}
 		inst := f.instances[task]
 
-		// Wait out any in-flight load on this instance: Manager.Load
-		// refuses concurrent loads, and an obsolete load's memory claim
-		// must settle before we re-issue.
+		// Wait out any in-flight load on this instance. Manager.Load can
+		// supersede a running load, but letting it settle first keeps the
+		// GPU accounting clean: an obsolete load's memory claim must be
+		// released (or become steady-state) before the next engine
+		// profiles its slice.
 		if !f.awaitSettled(inst, seq) {
 			return
 		}
@@ -282,13 +304,22 @@ func (f *Fleet) Status() FleetStatus {
 	per := map[Task]Status{}
 	for _, task := range taskOrder {
 		s := f.instances[task].Status()
-		if msg, isQueued := queued[task]; isQueued && s.State == StateIdle {
+		if msg, isQueued := queued[task]; isQueued && (s.State == StateIdle || s.State == StateFailed) {
 			// Accepted but not yet issued (an earlier instance is still
 			// loading). Present as loading so pollers see one continuous
-			// startup, with an explanatory message.
+			// startup, with an explanatory message. A FAILED instance that
+			// is queued is a retry in flight: presenting the stale failure
+			// made a re-delivered configure look like it did nothing (the
+			// orchestrator snapshotted "failed" while the retry was still
+			// queued behind the main model — 2026-07-23 dev incident).
+			if s.State == StateFailed {
+				msg = "Queued: retrying after failure"
+			}
 			s.State = StateLoading
 			s.Model = desired[task].Model
 			s.Message = msg
+			s.Error = ""
+			s.StderrTail = nil
 		}
 		per[task] = s
 	}

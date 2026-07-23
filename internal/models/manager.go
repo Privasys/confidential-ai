@@ -215,6 +215,14 @@ type Manager struct {
 	cmd          *exec.Cmd
 	cancel       context.CancelFunc
 
+	// gen is the load generation. Every Load/Unload bumps it, and every
+	// state write from a load's goroutines (doLoad, runVLLM, the two
+	// parseProgress scanners, the crash watcher) is guarded on it, so a
+	// SUPERSEDED load can never clobber the state of its successor — the
+	// failure mode behind the 2026-07-23 dev incident where a dying
+	// superseded load marked the replacement load failed.
+	gen uint64
+
 	// appliedReq is the effective (defaults-applied) LoadRequest of the
 	// load currently serving or in flight. Load compares against it so a
 	// re-delivered identical configuration stays a no-op while a changed
@@ -320,21 +328,23 @@ func (m *Manager) Quantization() string {
 	return m.quantization
 }
 
-// Load starts loading a model. Returns an error if already loading.
-// Idempotent on the FULL effective request: re-delivering the identical
-// configuration (e.g. the orchestrator re-configuring after a restart)
-// is a no-op, but a same-model request with different parameters
-// triggers a reload — matching by model name alone silently discarded
-// parameter changes (applying max_model_len=262144 over a running 8192
-// instance did nothing, and tool-augmented prompts then blew the stale
-// context window).
-func (m *Manager) Load(req LoadRequest) error {
+// normalizeRequest produces the EFFECTIVE request for this instance:
+// task stamp, sizing defaults, and the family recipes (reasoning/tool
+// parsers, reranker hf_overrides). It is the ONLY place a request is
+// mutated, and it runs BEFORE the idempotency compare, so the compared,
+// served, and persisted requests are one and the same value. The
+// recipes previously applied later (in doLoad, after appliedReq was
+// stored) — a persisted request then carried recipe fields a fresh wire
+// request lacked, every restore→re-configure compared unequal, and a
+// byte-identical owner configure spuriously unloaded a serving 35B
+// (the 2026-07-23 dev incident). Idempotent: normalize(normalize(x)) ==
+// normalize(x), so restoring an old persisted (recipe-carrying) file
+// converges to the same effective request.
+func (m *Manager) normalizeRequest(req LoadRequest) LoadRequest {
 	// The instance's task is fixed at construction; the request either
 	// matches or is silently stamped (callers route by task already).
 	req.Task = m.task
 
-	// Apply defaults FIRST so idempotency compares effective requests,
-	// not wire requests.
 	if req.Dtype == "" {
 		req.Dtype = "auto"
 	}
@@ -357,42 +367,93 @@ func (m *Manager) Load(req LoadRequest) error {
 		if req.MaxNumSeqs == 0 {
 			req.MaxNumSeqs = 4
 		}
-	} else {
-		if req.MaxModelLen == 0 {
-			req.MaxModelLen = 8192
+		// The Qwen3 reranker must be served as sequence classification
+		// with the yes-logit as the score (see doLoad's previous home of
+		// this rule for the full rationale).
+		if m.task == TaskRerank && req.HFOverrides == "" &&
+			strings.Contains(strings.ToLower(req.Model), "qwen3-reranker") {
+			req.HFOverrides = `{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}`
 		}
-		if req.GPUMemoryUtilization == 0 {
-			req.GPUMemoryUtilization = 0.90
+		return req
+	}
+
+	if req.MaxModelLen == 0 {
+		req.MaxModelLen = 8192
+	}
+	if req.GPUMemoryUtilization == 0 {
+		req.GPUMemoryUtilization = 0.90
+	}
+	if req.MaxNumSeqs == 0 {
+		// vLLM's own default (1024) is sized for serving clusters and
+		// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
+		// block per decode sequence) fail at KV-cache init on a single
+		// H100. NOTE: for such models a high value can still abort CUDA
+		// graph capture ("max_num_seqs exceeds available Mamba cache
+		// blocks") at long contexts — cap max_model_len accordingly, or
+		// lower this via the load request's max_num_seqs.
+		req.MaxNumSeqs = 256
+	}
+
+	// Family recipes for the chat model (explicit fields always win; see
+	// the per-family notes that used to live in doLoad).
+	lname := strings.ToLower(req.Model)
+	if strings.Contains(lname, "gemma4") {
+		if req.ReasoningParser == "" {
+			req.ReasoningParser = "gemma4"
 		}
-		if req.MaxNumSeqs == 0 {
-			// vLLM's own default (1024) is sized for serving clusters and
-			// makes hybrid-attention models (Qwen 3.6 MoE: one Mamba cache
-			// block per decode sequence) fail at KV-cache init on a single
-			// H100. NOTE: for such models a high value can still abort CUDA
-			// graph capture ("max_num_seqs exceeds available Mamba cache
-			// blocks") at long contexts — cap max_model_len accordingly, or
-			// lower this via the load request's max_num_seqs.
-			req.MaxNumSeqs = 256
+		if req.ToolCallParser == "" {
+			req.ToolCallParser = "gemma4"
+			req.EnableAutoToolChoice = true
+		}
+		if req.ChatTemplate == "" {
+			req.ChatTemplate = "gemma4"
+		}
+		if !req.EnableThinking {
+			req.EnableThinking = true
 		}
 	}
+	if strings.Contains(lname, "qwen3") || strings.Contains(lname, "qwen36") || strings.Contains(lname, "qwen35") {
+		if req.ReasoningParser == "" {
+			req.ReasoningParser = "qwen3"
+		}
+		if req.ToolCallParser == "" {
+			req.ToolCallParser = "qwen3_coder"
+			req.EnableAutoToolChoice = true
+		}
+		if !req.EnableThinking {
+			req.EnableThinking = true
+		}
+	}
+	return req
+}
+
+// Load starts loading a model. Idempotent on the FULL effective request:
+// re-delivering the identical configuration (e.g. the orchestrator
+// re-configuring after a restart) is a no-op whether the load is serving
+// OR still in flight; a request with different parameters supersedes —
+// the serving/in-flight load is stopped and the new one started.
+// Matching by model name alone silently discarded parameter changes
+// (applying max_model_len=262144 over a running 8192 instance did
+// nothing, and tool-augmented prompts then blew the stale context
+// window).
+func (m *Manager) Load(req LoadRequest) error {
+	req = m.normalizeRequest(req)
 
 	m.mu.Lock()
 
-	// Idempotent: the identical effective configuration is already serving.
-	if m.state == StateReady && req == m.appliedReq {
+	// Idempotent: the identical effective configuration is already
+	// serving, or already on its way (join the in-flight load rather
+	// than erroring — a re-issued configure during startup used to get
+	// "already loading" and surface as a spurious failure).
+	if (m.state == StateReady || m.state == StateLoading) && req == m.appliedReq {
 		m.mu.Unlock()
 		return nil
 	}
 
-	// Already loading.
-	if m.state == StateLoading {
-		m.mu.Unlock()
-		return fmt.Errorf("already loading model %q", m.model)
-	}
-
-	// A model is serving with a different configuration (other model OR
-	// other parameters): unload it, then load the new request.
-	if m.state == StateReady {
+	// A different configuration is serving or in flight: supersede it.
+	// Unload bumps the generation first, so the dying load's goroutines
+	// can no longer touch state, then kills the process group.
+	if m.state == StateReady || m.state == StateLoading {
 		m.mu.Unlock()
 		if err := m.Unload(); err != nil {
 			return fmt.Errorf("unload current model: %w", err)
@@ -400,6 +461,8 @@ func (m *Manager) Load(req LoadRequest) error {
 		m.mu.Lock()
 	}
 
+	m.gen++
+	gen := m.gen
 	m.state = StateLoading
 	m.model = req.Model
 	m.quantization = req.Quantization
@@ -409,10 +472,24 @@ func (m *Manager) Load(req LoadRequest) error {
 	m.message = "Starting vLLM..."
 	m.loadStart = time.Now()
 	m.loadErr = ""
+	m.stderrTail = nil
 	m.mu.Unlock()
 
-	go m.doLoad(req)
+	go m.doLoad(req, gen)
 	return nil
+}
+
+// ifGen runs fn under the lock only when gen is still the current load
+// generation. Every state write from a load's goroutines goes through
+// this so a superseded load cannot clobber its successor.
+func (m *Manager) ifGen(gen uint64, fn func()) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen != gen {
+		return false
+	}
+	fn()
+	return true
 }
 
 // Unload stops vLLM and frees resources.
@@ -435,6 +512,12 @@ func (m *Manager) Unload() error {
 		m.mu.Unlock()
 		return nil
 	}
+	// Invalidate the load generation BEFORE killing: any in-flight load
+	// goroutine (doLoad/runVLLM/scanners) checks the generation under
+	// this same lock before writing state, so after this point the dying
+	// load is a pure bystander — it can neither mark the instance failed
+	// nor persist its request.
+	m.gen++
 	cancel := m.cancel
 	cmd := m.cmd
 	m.cancel = nil
@@ -488,111 +571,45 @@ func (m *Manager) ListAvailable() ([]string, error) {
 	return models, nil
 }
 
-// doLoad runs the vLLM subprocess and tracks its progress.
-func (m *Manager) doLoad(req LoadRequest) {
+// doLoad runs the vLLM subprocess and tracks its progress. gen is the
+// load generation captured by Load; every state write is guarded on it.
+func (m *Manager) doLoad(req LoadRequest, gen uint64) {
 	ctx, cancel := context.WithCancel(context.Background())
-	m.mu.Lock()
-	m.cancel = cancel
-	m.mu.Unlock()
+	// Register the cancel handle only while this load is still current:
+	// Unload bumps the generation under the same lock before reading the
+	// handle, so either it sees our cancel (and cancels us) or we see the
+	// stale generation here and abort before spawning anything.
+	if !m.ifGen(gen, func() { m.cancel = cancel }) {
+		cancel()
+		return
+	}
 
 	defer func() {
 		cancel()
-		m.mu.Lock()
-		m.cancel = nil
-		m.mu.Unlock()
+		m.ifGen(gen, func() { m.cancel = nil })
 	}()
 
 	// Resolve model path. Source overrides Model when present, so the
 	// served name (the canonical id reported back to clients) can be
 	// short and friendly while the loader still finds the on-disk
-	// safetensors directory.
+	// safetensors directory. Family recipes (reasoning/tool parsers,
+	// reranker hf_overrides) were already applied by normalizeRequest in
+	// Load — BEFORE the idempotency compare and persistence, so the
+	// compared, served, and persisted requests are identical.
 	loaderID := req.Source
 	if loaderID == "" {
 		loaderID = req.Model
 	}
 	modelPath := m.resolveModelPath(loaderID)
 
-	// Pooling / classification instances take none of the chat recipes
-	// below (a reasoning parser on an embedding model is at best noise,
-	// and "qwen3-embedding-06b" would substring-match the qwen3 recipe).
-	// The one family auto-default they DO get is the Qwen3 reranker's
-	// sequence-classification hf_overrides: vLLM must load it as
-	// Qwen3ForSequenceClassification with the yes-logit as the score.
-	if req.Task == TaskEmbed || req.Task == TaskRerank {
-		if req.Task == TaskRerank && req.HFOverrides == "" &&
-			strings.Contains(strings.ToLower(req.Model), "qwen3-reranker") {
-			req.HFOverrides = `{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}`
-		}
-		m.runVLLM(ctx, req, loaderID, modelPath)
-		return
-	}
-
-	// Sensible defaults for known model families. Callers (the seed
-	// scripts, the management-service, ad-hoc /v1/models/load) don't
-	// have to know which architecture-specific reasoning + tool
-	// parsers vLLM ships; if the canonical id contains "gemma4" we
-	// auto-wire the official Gemma 4 thinking recipe (see
-	// https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html).
-	// Explicit fields on LoadRequest still win, so anyone can override
-	// (e.g. to disable thinking-by-default or point at a custom
-	// chat template).
-	if strings.Contains(strings.ToLower(req.Model), "gemma4") {
-		if req.ReasoningParser == "" {
-			req.ReasoningParser = "gemma4"
-		}
-		if req.ToolCallParser == "" {
-			req.ToolCallParser = "gemma4"
-			req.EnableAutoToolChoice = true
-		}
-		if req.ChatTemplate == "" {
-			req.ChatTemplate = "gemma4"
-		}
-		if !req.EnableThinking {
-			req.EnableThinking = true
-		}
-	}
-
-	// Qwen3 / Qwen3.5 / Qwen3.6 are thinking models: without
-	// `--reasoning-parser qwen3` vLLM emits the entire `<think>…</think>`
-	// block as plain `content`, the chat UI's splitReasoning() routes it
-	// to the Thought-process panel, and any reply where the model puts
-	// everything inside <think> (a common Qwen3 failure mode for short
-	// agentic prompts) renders as an empty assistant message.
-	//
-	// Tool calls need `--tool-call-parser qwen3_coder` plus
-	// `--enable-auto-tool-choice`. NOTE: we previously used `hermes`
-	// here because Qwen3 historically reused the Hermes XML schema,
-	// but Qwen3.5/3.6 emit the newer `<function=...><parameter=...>`
-	// XML format (a.k.a. "qwen3_coder" / "xml") that Hermes does not
-	// recognise. With `hermes` selected the model's free-form
-	// `<function=…>` output is left in `content` and `tool_calls` is
-	// returned as `[]`, which silently breaks agentic clients (Zed
-	// stops after the first assistant message because no tool call
-	// ever materialises). The `qwen3_coder` parser ships in vLLM
-	// >=0.10 and is verified for `qwen36-35b-a3b-fp8`.
-	//
-	// Same override-wins-if-set policy as gemma4 above.
-	lname := strings.ToLower(req.Model)
-	if strings.Contains(lname, "qwen3") || strings.Contains(lname, "qwen36") || strings.Contains(lname, "qwen35") {
-		if req.ReasoningParser == "" {
-			req.ReasoningParser = "qwen3"
-		}
-		if req.ToolCallParser == "" {
-			req.ToolCallParser = "qwen3_coder"
-			req.EnableAutoToolChoice = true
-		}
-		if !req.EnableThinking {
-			req.EnableThinking = true
-		}
-	}
-
-	m.runVLLM(ctx, req, loaderID, modelPath)
+	m.runVLLM(ctx, req, loaderID, modelPath, gen)
 }
 
-// runVLLM spawns the vLLM subprocess for the (recipe-applied) request,
+// runVLLM spawns the vLLM subprocess for the (normalized) request,
 // tracks progress, and blocks until the process exits. Shared tail of
-// doLoad for all tasks; ctx is doLoad's cancellable load context.
-func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelPath string) {
+// doLoad for all tasks; ctx is doLoad's cancellable load context, gen
+// the load generation guarding every state write.
+func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelPath string, gen uint64) {
 	args := buildVLLMArgs(req, modelPath, m.vllmPort)
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
@@ -640,7 +657,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// Pipe stderr for progress tracking.
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		m.setFailed("failed to create stderr pipe: " + err.Error())
+		m.setFailed(gen, "failed to create stderr pipe: "+err.Error())
 		return
 	}
 	// vLLM stdout is drained into the same ring as stderr — NEVER wired to
@@ -649,24 +666,31 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// container (see parseProgress).
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		m.setFailed("failed to create stdout pipe: " + err.Error())
+		m.setFailed(gen, "failed to create stdout pipe: "+err.Error())
 		return
 	}
 
-	m.mu.Lock()
-	m.cmd = cmd
-	m.message = "Starting vLLM process..."
-	m.mu.Unlock()
+	// Register the cmd handle only while still the current load —
+	// superseded before Start means nothing was spawned and nothing to
+	// kill; just walk away.
+	if !m.ifGen(gen, func() {
+		m.cmd = cmd
+		m.message = "Starting vLLM process..."
+	}) {
+		return
+	}
 
 	if err := cmd.Start(); err != nil {
-		m.setFailed("failed to start vLLM: " + err.Error())
+		m.setFailed(gen, "failed to start vLLM: "+err.Error())
 		return
 	}
 
 	// Parse both streams for progress/tail in background. parseProgress
-	// appends to the shared ring under m.mu, so two scanners are safe.
-	go m.parseProgress(stderr)
-	go m.parseProgress(stdout)
+	// appends to the shared ring under m.mu, so two scanners are safe;
+	// both carry gen so a superseded load's dying output never pollutes
+	// the successor's tail/progress.
+	go m.parseProgress(stderr, gen)
+	go m.parseProgress(stdout, gen)
 
 	// Single owner of cmd.Wait: every consumer below reads waitCh, so the
 	// exit status is observed exactly once and the readiness loop can
@@ -676,16 +700,16 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for vLLM to be ready OR for the process to die.
-	if err := m.waitForReady(ctx, waitCh); err != nil {
+	if err := m.waitForReady(ctx, waitCh, gen); err != nil {
 		if exitErr, died := err.(*vllmExitError); died {
 			// The process died: fail immediately with the REAL reason
 			// (last error lines off stderr), not a generic timeout N
 			// minutes later. On 2026-07-15 every engine death (argparse
 			// error, KV-floor ValueError, memcg OOM kill) hid behind
 			// "not ready after N minutes" for its full window.
-			m.setFailed(exitErr.Error())
+			m.setFailed(gen, exitErr.Error())
 		} else {
-			m.setFailed("vLLM health check failed: " + err.Error())
+			m.setFailed(gen, "vLLM health check failed: "+err.Error())
 			// Kill the whole process GROUP, exactly like Unload: killing
 			// only the APIServer pid leaks its EngineCore children, which
 			// keep their full GPU allocation alive. Three leaked cores held
@@ -714,27 +738,33 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		digest = m.computeDigest(modelPath)
 	}
 
-	m.mu.Lock()
-	m.state = StateReady
-	m.model = req.Model
-	m.modelDigest = digest
-	m.progress = 1.0
-	m.message = "Model loaded and serving"
-	m.mu.Unlock()
+	if !m.ifGen(gen, func() {
+		m.state = StateReady
+		m.model = req.Model
+		m.modelDigest = digest
+		m.progress = 1.0
+		m.message = "Model loaded and serving"
+	}) {
+		// Superseded while becoming ready: Unload already killed the
+		// process group; do not persist the dead configuration.
+		return
+	}
 
 	// Persist the successful load so a container restart auto-recovers.
 	m.persistRequest(req)
 
 	// Wait for process exit (blocks until vLLM dies or is killed).
 	if err := <-waitCh; err != nil {
-		m.mu.Lock()
-		if m.state == StateReady {
-			// Unexpected crash: surface the stderr tail, not just the
-			// exit code.
-			m.state = StateFailed
-			m.loadErr = "vLLM process exited unexpectedly: " + err.Error() + m.stderrTailSuffix()
-		}
-		m.mu.Unlock()
+		// gen guard: after an Unload/supersede this crash belongs to the
+		// old load and must not fail the new one.
+		m.ifGen(gen, func() {
+			if m.state == StateReady {
+				// Unexpected crash: surface the stderr tail, not just the
+				// exit code.
+				m.state = StateFailed
+				m.loadErr = "vLLM process exited unexpectedly: " + err.Error() + m.stderrTailSuffix()
+			}
+		})
 	}
 }
 
@@ -917,7 +947,7 @@ func (m *Manager) resolveModelPath(model string) string {
 var progressPattern = regexp.MustCompile(`Loading model weights.*?(\d+)%`)
 var shardPattern = regexp.MustCompile(`Loading safetensors.*?(\d+)/(\d+)`)
 
-func (m *Manager) parseProgress(r io.Reader) {
+func (m *Manager) parseProgress(r io.Reader, gen uint64) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -930,26 +960,31 @@ func (m *Manager) parseProgress(r io.Reader) {
 		// ring, surfaced via /v1/models/status.
 
 		// Keep a short tail ring so a process death can report the real
-		// error instead of a bare exit code.
-		m.mu.Lock()
-		m.stderrTail = append(m.stderrTail, line)
-		// Keep enough lines to reach past a Python traceback to the actual engine
-		// error: vLLM's "Engine core initialization failed. See root cause above."
-		// is the tail of a long API-server traceback, and the EngineCore child's
-		// real exception is many lines earlier in the same stream.
-		if len(m.stderrTail) > 400 {
-			m.stderrTail = m.stderrTail[len(m.stderrTail)-400:]
+		// error instead of a bare exit code. Gen-guarded: a superseded
+		// load's dying output must not pollute the successor's ring —
+		// keep DRAINING though, so the dying process never blocks on a
+		// full pipe.
+		if !m.ifGen(gen, func() {
+			m.stderrTail = append(m.stderrTail, line)
+			// Keep enough lines to reach past a Python traceback to the actual engine
+			// error: vLLM's "Engine core initialization failed. See root cause above."
+			// is the tail of a long API-server traceback, and the EngineCore child's
+			// real exception is many lines earlier in the same stream.
+			if len(m.stderrTail) > 400 {
+				m.stderrTail = m.stderrTail[len(m.stderrTail)-400:]
+			}
+		}) {
+			continue
 		}
-		m.mu.Unlock()
 
 		// Parse percentage progress.
 		if matches := progressPattern.FindStringSubmatch(line); len(matches) > 1 {
 			var pct float64
 			fmt.Sscanf(matches[1], "%f", &pct)
-			m.mu.Lock()
-			m.progress = pct / 100.0
-			m.message = fmt.Sprintf("Loading weights... %d%%", int(pct))
-			m.mu.Unlock()
+			m.ifGen(gen, func() {
+				m.progress = pct / 100.0
+				m.message = fmt.Sprintf("Loading weights... %d%%", int(pct))
+			})
 		}
 
 		// Parse shard progress.
@@ -958,10 +993,10 @@ func (m *Manager) parseProgress(r io.Reader) {
 			fmt.Sscanf(matches[1], "%d", &done)
 			fmt.Sscanf(matches[2], "%d", &total)
 			if total > 0 {
-				m.mu.Lock()
-				m.progress = float64(done) / float64(total)
-				m.message = fmt.Sprintf("Loading weights (%d/%d shards)...", done, total)
-				m.mu.Unlock()
+				m.ifGen(gen, func() {
+					m.progress = float64(done) / float64(total)
+					m.message = fmt.Sprintf("Loading weights (%d/%d shards)...", done, total)
+				})
 			}
 		}
 	}
@@ -970,13 +1005,11 @@ func (m *Manager) parseProgress(r io.Reader) {
 // waitForReady polls vLLM /health until it returns 200, the process
 // dies (waitCh fires → fail fast with a *vllmExitError carrying the
 // stderr tail), or the context is cancelled.
-func (m *Manager) waitForReady(ctx context.Context, waitCh chan error) error {
+func (m *Manager) waitForReady(ctx context.Context, waitCh chan error, gen uint64) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", m.vllmPort)
 
-	m.mu.Lock()
-	m.message = "Waiting for vLLM to become ready..."
-	m.mu.Unlock()
+	m.ifGen(gen, func() { m.message = "Waiting for vLLM to become ready..." })
 
 	// 15-minute cap: vLLM weight load is ~5 min for our largest model
 	// but the FIRST inference after a fresh start triggers FlashInfer's
@@ -1158,12 +1191,15 @@ func (m *Manager) stderrTailSuffix() string {
 	return ""
 }
 
-func (m *Manager) setFailed(errMsg string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.state = StateFailed
-	m.loadErr = errMsg
-	m.message = "Failed: " + errMsg
+// setFailed marks the load failed — only when gen is still the current
+// load generation, so a superseded load's death never fails its
+// successor.
+func (m *Manager) setFailed(gen uint64, errMsg string) {
+	m.ifGen(gen, func() {
+		m.state = StateFailed
+		m.loadErr = errMsg
+		m.message = "Failed: " + errMsg
+	})
 }
 
 // persistRequest writes the LoadRequest to stateFile so a future

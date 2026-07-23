@@ -223,6 +223,11 @@ type Manager struct {
 	// superseded load marked the replacement load failed.
 	gen uint64
 
+	// procDone closes when runVLLM's single cmd.Wait owner returns.
+	// Unload waits on it instead of calling cmd.Wait() itself: two
+	// concurrent Waits on one exec.Cmd are a data race.
+	procDone chan struct{}
+
 	// appliedReq is the effective (defaults-applied) LoadRequest of the
 	// load currently serving or in flight. Load compares against it so a
 	// re-delivered identical configuration stays a no-op while a changed
@@ -520,6 +525,7 @@ func (m *Manager) Unload() error {
 	m.gen++
 	cancel := m.cancel
 	cmd := m.cmd
+	procDone := m.procDone
 	m.cancel = nil
 	m.mu.Unlock()
 
@@ -538,9 +544,18 @@ func (m *Manager) Unload() error {
 		} else {
 			_ = cmd.Process.Kill()
 		}
-		// cmd.WaitDelay (set in doLoad) bounds this at 10 s even if a
-		// grandchild keeps the pipe open.
-		_ = cmd.Wait()
+		// Wait for the reap via runVLLM's single Wait owner — calling
+		// cmd.Wait() here as well is a data race on exec.Cmd (two
+		// concurrent Waits; caught by -race once Load learned to
+		// supersede in-flight loads). procDone closes when that owner's
+		// Wait returns; cmd.WaitDelay bounds it at 10 s after the kill
+		// even if a grandchild keeps the pipe open.
+		if procDone != nil {
+			select {
+			case <-procDone:
+			case <-time.After(15 * time.Second):
+			}
+		}
 	}
 
 	m.mu.Lock()
@@ -553,6 +568,7 @@ func (m *Manager) Unload() error {
 	m.message = ""
 	m.loadErr = ""
 	m.cmd = nil
+	m.procDone = nil
 	return nil
 }
 
@@ -695,9 +711,17 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// Single owner of cmd.Wait: every consumer below reads waitCh, so the
 	// exit status is observed exactly once and the readiness loop can
 	// fail FAST on process death instead of waiting out its cap. Buffered
-	// so the goroutine never leaks if nobody reads.
+	// so the goroutine never leaks if nobody reads. procDone additionally
+	// broadcasts the reap to Unload, which must never call cmd.Wait()
+	// itself (two concurrent Waits on one exec.Cmd are a data race).
 	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
+	procDone := make(chan struct{})
+	go func() {
+		err := cmd.Wait()
+		waitCh <- err
+		close(procDone)
+	}()
+	m.ifGen(gen, func() { m.procDone = procDone })
 
 	// Wait for vLLM to be ready OR for the process to die.
 	if err := m.waitForReady(ctx, waitCh, gen); err != nil {

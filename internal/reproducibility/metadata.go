@@ -25,13 +25,30 @@ type Metadata struct {
 	TeeType            string  `json:"tee_type"`
 	Timestamp          string  `json:"timestamp"`
 
-	// DynamicContext is the per-request context block injected just before
-	// the latest user turn (currently the wall-clock time). It is recorded
-	// verbatim so a replay can reconstruct the exact prompt: re-issue the
-	// request with the X-Privasys-Dynamic-Context header set to this value
-	// (and the recorded seed) to reproduce the response token-for-token.
-	// Empty when nothing was injected.
+	// DynamicContext is the per-request context block the proxy injected at
+	// the tail of the last user message (currently the wall-clock time). It
+	// is recorded verbatim so a replay can reconstruct the exact prompt:
+	// re-issue the request with the X-Privasys-Dynamic-Context header set to
+	// this value (and the recorded seed) to reproduce the response
+	// token-for-token. Empty when nothing was injected.
 	DynamicContext string `json:"dynamic_context,omitempty"`
+
+	// KVCacheMode records how the vLLM prefix (KV) cache was scoped for
+	// this request: "session" (caller-partitioned cache_salt — KV blocks
+	// may be reused across this caller's own requests) or "strict"
+	// (single-use salt — zero cache reuse, the full prompt was freshly
+	// prefilled). A replay is always cache-cold regardless of the serving
+	// mode.
+	KVCacheMode string `json:"kv_cache_mode,omitempty"`
+
+	// CachedTokens is the number of prompt tokens vLLM served from the
+	// prefix cache (usage.prompt_tokens_details.cached_tokens). 0 in
+	// strict mode by construction. When 0, a serialized replay must match
+	// token-for-token; when >0, cached KV blocks computed under a
+	// different batch composition were reused, so a replay is expected to
+	// match but can diverge at logit near-ties until kernel-level batch
+	// invariance ships. Nil when the upstream did not report the detail.
+	CachedTokens *int64 `json:"cached_tokens,omitempty"`
 
 	// ToolCalls, when non-nil, lists the MCP tool invocations that
 	// served this response (populated by the agentic loop). Each entry
@@ -115,7 +132,13 @@ func NewMetadata(
 		CUDAVersion:        cudaVersion,
 		GPU:                gpu,
 		TensorParallelSize: 1,
-		BatchInvariance:    true,
+		// Honest value: kernel-level batch invariance is NOT enabled (we
+		// run stock vLLM kernels; the upstream VLLM_BATCH_INVARIANT work
+		// is tracked separately). What we guarantee is serialized replay
+		// determinism from the recorded seed + prompt, not bitwise
+		// equality under concurrent batching. This field was previously
+		// hardcoded true, which overstated the contract.
+		BatchInvariance: false,
 		ImageDigest:        imageDigest,
 		TeeType:            teeType,
 		Timestamp:          time.Now().UTC().Format(time.RFC3339),

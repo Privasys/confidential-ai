@@ -141,9 +141,17 @@ func TestChatCompletionsInjectsReproducibility(t *testing.T) {
 		t.Errorf("expected a random default seed in [0, 2^32), got %v", repro["seed"])
 	}
 
-	// batch_invariance should be true
-	if bi, ok := repro["batch_invariance"].(bool); !ok || !bi {
-		t.Errorf("expected batch_invariance true, got %v", repro["batch_invariance"])
+	// batch_invariance is reported honestly: stock vLLM kernels are NOT
+	// batch-invariant (the contract is serialized replay determinism, not
+	// bitwise equality under concurrent batching).
+	if bi, ok := repro["batch_invariance"].(bool); !ok || bi {
+		t.Errorf("expected batch_invariance false, got %v", repro["batch_invariance"])
+	}
+
+	// The KV-cache scope must be disclosed; without the strict header the
+	// request runs in the caller-partitioned session mode.
+	if km := repro["kv_cache_mode"]; km != "session" {
+		t.Errorf("expected kv_cache_mode \"session\", got %v", km)
 	}
 
 	// tensor_parallel_size should be 1

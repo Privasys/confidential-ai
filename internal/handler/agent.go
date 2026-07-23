@@ -62,14 +62,30 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Inject the per-request dynamic context (wall clock) just before the
-	// latest user turn, recorded below for reproducible replay. Out of the
-	// static system prompt so that prefix stays cacheable.
+	// Inject the per-request dynamic context (wall clock) at the tail of the
+	// last user message (see injectDynamicContext), recorded below for
+	// reproducible replay. Later tool-loop iterations append assistant/tool
+	// turns after it; the injected block stays in the final USER turn.
 	dynCtx := dynamicContext(r)
 	body, err = injectDynamicContext(body, dynCtx)
 	if err != nil {
 		h.requestsFailed.Add(1)
 		writeError(w, http.StatusInternalServerError, "failed to inject context")
+		return
+	}
+
+	// Scope the vLLM prefix cache (see cache_salt.go). Injected once here,
+	// the salt rides through every tool-loop iteration, so successive
+	// upstream calls in one agentic request reuse each other's growing
+	// prompt prefix — the loop re-sends the whole transcript per turn.
+	kvMode := kvCacheModeSession
+	if wantsStrictReproducibility(r) {
+		kvMode = kvCacheModeStrict
+	}
+	body, err = injectCacheSalt(body, h.cacheSalt(r, kvMode))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject cache salt")
 		return
 	}
 
@@ -274,6 +290,12 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 
 	meta := h.buildMetadata(reqParams)
 	meta.DynamicContext = dynCtx
+	meta.KVCacheMode = kvMode
+	// Cache hits of the FINAL tool-loop turn. In strict mode earlier
+	// iterations of this same request may still hit their own blocks (the
+	// salt is per-request, so intra-request reuse is symmetric under
+	// replay), but nothing from any other request.
+	meta.CachedTokens = extractCachedTokens(finalBody)
 	addToolCallsToMeta(meta, results)
 	wantRepro := wantsReproducibility(r)
 
@@ -409,6 +431,7 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 		toolCalls        = map[int]*tcAccum{}
 		promptTokens     int64
 		completionTokens int64
+		cachedTokens     *int64
 		usageSeen        bool
 	)
 
@@ -455,8 +478,11 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
+				PromptTokens        int64 `json:"prompt_tokens"`
+				CompletionTokens    int64 `json:"completion_tokens"`
+				PromptTokensDetails *struct {
+					CachedTokens *int64 `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(payload, &chunk); err != nil {
@@ -485,6 +511,9 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
 			promptTokens = chunk.Usage.PromptTokens
 			completionTokens = chunk.Usage.CompletionTokens
+			if d := chunk.Usage.PromptTokensDetails; d != nil {
+				cachedTokens = d.CachedTokens
+			}
 			usageSeen = true
 		}
 		if len(chunk.Choices) == 0 {
@@ -588,11 +617,15 @@ func (h *Handler) callVLLMStream(ctx context.Context, body []byte, sink func([]b
 	// non-stream path. Absent when the client did not enable include_usage
 	// and metering was off (no usage chunk requested).
 	if usageSeen {
-		full["usage"] = map[string]any{
+		usage := map[string]any{
 			"prompt_tokens":     promptTokens,
 			"completion_tokens": completionTokens,
 			"total_tokens":      promptTokens + completionTokens,
 		}
+		if cachedTokens != nil {
+			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": *cachedTokens}
+		}
+		full["usage"] = usage
 	}
 	return json.Marshal(full)
 }

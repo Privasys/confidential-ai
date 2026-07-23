@@ -240,6 +240,12 @@
           "default": true,
           "x-privasys": { "label": "Chunked prefill" }
         },
+        "enable_prefix_caching": {
+          "type": "boolean",
+          "description": "vLLM automatic prefix caching. Reuse is partitioned per caller (server-derived cache_salt) and every response discloses its hits (reproducibility.cached_tokens); strict-replay callers bypass it per request. Experimental on hybrid Mamba models (hits only on completed ~528-token blocks).",
+          "default": false,
+          "x-privasys": { "label": "Prefix caching" }
+        },
         "max_num_batched_tokens": {
           "type": "integer",
           "description": "vLLM --max-num-batched-tokens. 32768 is the production 262k recipe with chunked prefill on.",

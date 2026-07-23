@@ -7,10 +7,12 @@ import (
 	"testing"
 )
 
-func TestInjectDynamicContext_MergesIntoLeadingSystem(t *testing.T) {
-	// Multi-turn conversation with a leading system prompt: the context must be
-	// APPENDED to it (one system message, first) — vLLM/Qwen reject both a
-	// mid-conversation system message and a second system message.
+func TestInjectDynamicContext_TailOfLastUserMessage(t *testing.T) {
+	// Multi-turn conversation: the context is appended as a delimited block
+	// at the END of the LAST user message, so the system prompt and the
+	// whole history stay byte-stable (the cacheable prefix). Verified
+	// empirically on Qwen3.6-35B (2026-07-23): tail-injected context is
+	// answered correctly in thinking and non-thinking modes.
 	body := []byte(`{"model":"m","messages":[` +
 		`{"role":"system","content":"STATIC PROMPT"},` +
 		`{"role":"user","content":"hello"},` +
@@ -30,33 +32,33 @@ func TestInjectDynamicContext_MergesIntoLeadingSystem(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// No message inserted — merged into the existing system prompt.
 	if len(m.Messages) != 4 {
 		t.Fatalf("expected 4 messages, got %d", len(m.Messages))
 	}
-	// Exactly one system message, first, carrying both the static prompt and
-	// the injected time.
-	if m.Messages[0].Role != "system" {
-		t.Errorf("message 0 not system: %+v", m.Messages[0])
+	// System prompt and history untouched — byte-stable prefix.
+	if m.Messages[0].Role != "system" || m.Messages[0].Content != "STATIC PROMPT" {
+		t.Errorf("system prompt must stay untouched: %+v", m.Messages[0])
 	}
-	if !strings.HasPrefix(m.Messages[0].Content, "STATIC PROMPT") || !strings.Contains(m.Messages[0].Content, "2026-06-30T20:48:00Z") {
-		t.Errorf("system prompt not merged: %q", m.Messages[0].Content)
+	if m.Messages[1].Content != "hello" || m.Messages[2].Content != "hi" {
+		t.Errorf("history changed: %+v", m.Messages)
 	}
-	for i, mm := range m.Messages[1:] {
-		if mm.Role == "system" {
-			t.Errorf("unexpected extra system message at index %d", i+1)
-		}
-	}
-	// Conversation preserved.
-	if m.Messages[1].Content != "hello" || m.Messages[2].Content != "hi" || m.Messages[3].Content != "what time is it?" {
-		t.Errorf("conversation changed: %+v", m.Messages)
+	// Context appended to the final user turn, delimited.
+	last := m.Messages[3]
+	if last.Role != "user" ||
+		!strings.HasPrefix(last.Content, "what time is it?") ||
+		!strings.Contains(last.Content, "---\n(Context: The current date and time is 2026-06-30T20:48:00Z (UTC).)") {
+		t.Errorf("context not tail-injected: %q", last.Content)
 	}
 }
 
-func TestInjectDynamicContext_NoLeadingSystem(t *testing.T) {
-	// No system prompt: the context becomes a new leading system message.
-	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"time?"}]}`)
-	out, err := injectDynamicContext(body, "TIME-CTX")
+func TestInjectDynamicContext_LastUserNotTrailing(t *testing.T) {
+	// The last USER message wins even when the conversation ends on an
+	// assistant/tool turn (agentic bodies mid-loop).
+	body := []byte(`{"messages":[` +
+		`{"role":"user","content":"question"},` +
+		`{"role":"assistant","content":"calling tool"}` +
+		`]}`)
+	out, err := injectDynamicContext(body, "T-CTX")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -66,17 +68,17 @@ func TestInjectDynamicContext_NoLeadingSystem(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(m.Messages) != 4 || m.Messages[0].Role != "system" || m.Messages[0].Content != "TIME-CTX" {
-		t.Fatalf("expected injected system at index 0, got %+v", m.Messages)
+	if !strings.Contains(m.Messages[0].Content, "T-CTX") {
+		t.Errorf("context not injected into last user turn: %+v", m.Messages)
 	}
-	if m.Messages[1].Role != "user" || m.Messages[1].Content != "hi" {
-		t.Errorf("first user turn changed: %+v", m.Messages[1])
+	if strings.Contains(m.Messages[1].Content, "T-CTX") {
+		t.Errorf("assistant turn must not carry the context: %+v", m.Messages[1])
 	}
 }
 
-func TestInjectDynamicContext_SystemOnlyMerges(t *testing.T) {
-	// A system-only body still merges into the one system message (harmless,
-	// and keeps a single leading system message).
+func TestInjectDynamicContext_NoUserFallsBackToSystem(t *testing.T) {
+	// A system-only body merges into the one system message (there must be
+	// exactly one system message, first).
 	body := []byte(`{"messages":[{"role":"system","content":"x"}]}`)
 	out, err := injectDynamicContext(body, "T")
 	if err != nil {
@@ -90,6 +92,35 @@ func TestInjectDynamicContext_SystemOnlyMerges(t *testing.T) {
 	}
 	if len(m.Messages) != 1 || m.Messages[0].Role != "system" || !strings.Contains(m.Messages[0].Content, "T") {
 		t.Errorf("expected merged single system message, got %+v", m.Messages)
+	}
+}
+
+func TestInjectDynamicContext_NoUserNoSystemPrepends(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"assistant","content":"yo"}]}`)
+	out, err := injectDynamicContext(body, "T-CTX")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var m struct {
+		Messages []struct{ Role, Content string } `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(m.Messages) != 2 || m.Messages[0].Role != "system" || m.Messages[0].Content != "T-CTX" {
+		t.Fatalf("expected prepended system message, got %+v", m.Messages)
+	}
+}
+
+func TestInjectDynamicContext_MultimodalUserContent(t *testing.T) {
+	// Array-of-parts user content gets a text part appended.
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"describe"}]}]}`)
+	out, err := injectDynamicContext(body, "T-CTX")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(string(out), "T-CTX") {
+		t.Errorf("context missing from multimodal body: %s", out)
 	}
 }
 

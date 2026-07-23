@@ -132,6 +132,17 @@ type LoadRequest struct {
 	// vLLM refuses MNBT < max_model_len in that mode.
 	MaxNumBatchedTokens int `json:"max_num_batched_tokens,omitempty"`
 
+	// EnablePrefixCaching turns on vLLM automatic prefix caching
+	// (`--enable-prefix-caching`). Default false — matching vLLM's own
+	// default for the hybrid (Mamba) models we serve, where support is
+	// still experimental (mamba_cache_mode=align; hits only on fully
+	// completed ~528-token aligned blocks). Reuse is scoped per caller
+	// by the proxy's cache_salt injection (see handler/cache_salt.go),
+	// and every response disclosed its hits via
+	// reproducibility.cached_tokens, so enabling this never silently
+	// weakens the replay contract — it is recorded per request.
+	EnablePrefixCaching bool `json:"enable_prefix_caching,omitempty"`
+
 	// KVCacheDtype sets `--kv-cache-dtype` (e.g. "fp8"). Halves the
 	// attention KV footprint on the hybrid models (20 -> 10 KiB/token
 	// on Qwen3.6-35B). Changes outputs vs fp16 KV, so it is part of
@@ -845,6 +856,9 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	)
 	if req.MaxNumSeqs > 0 {
 		args = append(args, "--max-num-seqs", fmt.Sprintf("%d", req.MaxNumSeqs))
+	}
+	if req.EnablePrefixCaching {
+		args = append(args, "--enable-prefix-caching")
 	}
 	if req.KVCacheDtype != "" {
 		args = append(args, "--kv-cache-dtype", req.KVCacheDtype)

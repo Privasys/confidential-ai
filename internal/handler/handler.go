@@ -40,6 +40,10 @@ var (
 type Handler struct {
 	cfg    *config.Config
 	client *http.Client
+	// saltKey keys the per-caller session cache_salt HMAC (see
+	// cache_salt.go). Per-process: the prefix cache dies with the vLLM
+	// engine this proxy supervises, so the key never needs to persist.
+	saltKey []byte
 	// fleet coordinates the vLLM instances (generate + embed + rerank).
 	// nil in legacy mode (vLLM started by entrypoint.sh, single model).
 	fleet *models.Fleet
@@ -133,8 +137,9 @@ func driveServerFromConfig(cfg *config.Config) *agent.Server {
 
 func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	h := &Handler{
-		cfg:   cfg,
-		fleet: fleet,
+		cfg:     cfg,
+		fleet:   fleet,
+		saltKey: newSaltKey(),
 		client: &http.Client{
 			Timeout: 5 * time.Minute, // LLM inference can be slow
 		},
@@ -847,14 +852,28 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Inject the per-request dynamic context (wall clock) just before the
-	// latest user turn, and record it for reproducible replay. Kept out of the
-	// static system prompt so that prompt stays a stable, cacheable prefix.
+	// Inject the per-request dynamic context (wall clock) at the tail of the
+	// last user message (see injectDynamicContext), and record it for
+	// reproducible replay. Tail placement keeps the system prompt and the
+	// conversation history a stable, cacheable prefix.
 	dynCtx := dynamicContext(r)
 	reqWithSeed, err = injectDynamicContext(reqWithSeed, dynCtx)
 	if err != nil {
 		h.requestsFailed.Add(1)
 		writeError(w, http.StatusInternalServerError, "failed to inject context")
+		return
+	}
+
+	// Scope the vLLM prefix cache for this request (see cache_salt.go):
+	// caller-partitioned reuse by default, zero reuse in strict mode.
+	kvMode := kvCacheModeSession
+	if wantsStrictReproducibility(r) {
+		kvMode = kvCacheModeStrict
+	}
+	reqWithSeed, err = injectCacheSalt(reqWithSeed, h.cacheSalt(r, kvMode))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject cache salt")
 		return
 	}
 
@@ -929,6 +948,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		h.cfg.TeeType,
 	)
 	meta.DynamicContext = dynCtx
+	meta.KVCacheMode = kvMode
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
@@ -996,6 +1016,7 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 	if id, in, out, ok := extractUsage(respBody); ok {
 		meter.record(id, in, out)
 	}
+	meta.CachedTokens = extractCachedTokens(respBody)
 
 	if !wantRepro {
 		// Pass the upstream body through verbatim.
@@ -1098,6 +1119,10 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 				if meter != nil {
 					if id, in, out, ok := extractStreamUsage(event); ok {
 						meter.record(id, in, out)
+						// The usage chunk precedes [DONE], and the repro
+						// frame is emitted at [DONE], so the cache-hit
+						// count lands in the metadata in time.
+						meta.CachedTokens = extractStreamCachedTokens(event)
 						if meter.suppressUsage {
 							event = event[:0]
 							continue
@@ -1549,14 +1574,15 @@ func injectSeed(body []byte, seed int64) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// dynamicContext returns the per-request context block injected just before the
-// latest user turn — currently the wall-clock time, so the model can answer
-// "what time is it?" without baking a timestamp into the (cacheable) system
-// prompt. A replay passes the recorded value back via the
-// X-Privasys-Dynamic-Context header so the prompt is reconstructed
-// byte-for-byte and the response stays reproducible; otherwise it is built from
-// the current UTC time. Returns "" only if the override header is explicitly
-// blank-after-trim AND there is no clock (unreachable), in practice non-empty.
+// dynamicContext returns the per-request context block injected at the tail of
+// the last user message — currently the wall-clock time, so the model can
+// answer "what time is it?" while the system prompt and conversation history
+// stay byte-stable (cacheable) across requests. A replay passes the recorded
+// value back via the X-Privasys-Dynamic-Context header so the prompt is
+// reconstructed byte-for-byte and the response stays reproducible; otherwise it
+// is built from the current UTC time. Returns "" only if the override header is
+// explicitly blank-after-trim AND there is no clock (unreachable), in practice
+// non-empty.
 func dynamicContext(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Privasys-Dynamic-Context")); v != "" {
 		return v
@@ -1565,17 +1591,24 @@ func dynamicContext(r *http.Request) string {
 		" (UTC). Treat this as the present moment when answering."
 }
 
-// injectDynamicContext folds the per-request context (the wall clock) into the
-// system prompt so the model treats it authoritatively.
+// injectDynamicContext appends the per-request context (the wall clock) as a
+// delimited block at the END of the LAST user message.
 //
-// It MUST be carried by a system message (a reasoning model disregards a context
-// line buried in a user turn and falls back to "I have no clock"), and there
-// must be exactly ONE system message, first: vLLM/Qwen reject both a system
-// message after a non-system turn AND a second system message ("System message
-// must be at the beginning"). So we append the context to the existing leading
-// system message (or add one when absent) rather than inserting a separate one.
-// The exact string is recorded in the reproducibility metadata (DynamicContext)
-// for deterministic replay.
+// Tail placement is deliberate: the system prompt and the whole conversation
+// history stay byte-stable across requests and turns, so when vLLM prefix
+// caching is enabled the longest possible prefix is reusable — only the final
+// user turn (never a cache hit anyway) carries the volatile timestamp. An
+// earlier iteration appended to the leading system message on the belief that
+// reasoning models disregard user-turn context; a controlled A/B on
+// Qwen3.6-35B (2026-07-23, sys vs tail vs trailing-user, thinking and
+// non-thinking) refuted that — tail-injected context is answered correctly in
+// both modes. The exact string is recorded in the reproducibility metadata
+// (DynamicContext) for deterministic replay: the replay re-injects it through
+// this same code path, byte-for-byte.
+//
+// When the conversation has no user message, fall back to merging into the
+// leading system message (or prepending one): vLLM/Qwen reject a system
+// message anywhere but first, and there must be exactly one.
 //
 // Returns the body unchanged when ctx is empty or there are no messages.
 func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
@@ -1590,23 +1623,43 @@ func injectDynamicContext(body []byte, ctx string) ([]byte, error) {
 	if !ok || len(msgs) == 0 {
 		return body, nil
 	}
-	// Append to the first message when it is a system message.
-	if first, ok := msgs[0].(map[string]any); ok && first["role"] == "system" {
-		switch c := first["content"].(type) {
+	block := "\n\n---\n(Context: " + ctx + ")"
+	// Find the last user message and append the context block to it.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg, ok := msgs[i].(map[string]any)
+		if !ok || msg["role"] != "user" {
+			continue
+		}
+		switch c := msg["content"].(type) {
 		case string:
-			first["content"] = c + "\n\n" + ctx
+			msg["content"] = c + block
 		case []any:
-			// Multimodal system content (array of parts): append a text part.
-			first["content"] = append(c, map[string]any{"type": "text", "text": "\n\n" + ctx})
+			// Multimodal content (array of parts): append a text part.
+			msg["content"] = append(c, map[string]any{"type": "text", "text": block})
 		case nil:
-			first["content"] = ctx
+			msg["content"] = "(Context: " + ctx + ")"
 		default:
 			return body, nil // unknown content shape; leave untouched
 		}
 		m["messages"] = msgs
 		return json.Marshal(m)
 	}
-	// No leading system message: prepend one.
+	// No user message. Merge into the leading system message when present.
+	if first, ok := msgs[0].(map[string]any); ok && first["role"] == "system" {
+		switch c := first["content"].(type) {
+		case string:
+			first["content"] = c + "\n\n" + ctx
+		case []any:
+			first["content"] = append(c, map[string]any{"type": "text", "text": "\n\n" + ctx})
+		case nil:
+			first["content"] = ctx
+		default:
+			return body, nil
+		}
+		m["messages"] = msgs
+		return json.Marshal(m)
+	}
+	// No user and no leading system message: prepend a system message.
 	m["messages"] = append([]any{map[string]any{"role": "system", "content": ctx}}, msgs...)
 	return json.Marshal(m)
 }
@@ -1618,7 +1671,56 @@ type usageEnvelope struct {
 	Usage *struct {
 		PromptTokens     int64 `json:"prompt_tokens"`
 		CompletionTokens int64 `json:"completion_tokens"`
+		// PromptTokensDetails carries vLLM's prefix-cache hit count
+		// (cached_tokens) when automatic prefix caching served part of
+		// the prompt. Surfaced in the reproducibility block.
+		PromptTokensDetails *struct {
+			CachedTokens *int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
+}
+
+// cachedTokens returns the prefix-cache hit count, or nil when the
+// upstream did not report the detail.
+func (e *usageEnvelope) cachedTokens() *int64 {
+	if e.Usage == nil || e.Usage.PromptTokensDetails == nil {
+		return nil
+	}
+	return e.Usage.PromptTokensDetails.CachedTokens
+}
+
+// extractCachedTokens parses usage.prompt_tokens_details.cached_tokens from
+// a non-streaming completion body (nil when absent).
+func extractCachedTokens(body []byte) *int64 {
+	var e usageEnvelope
+	if err := json.Unmarshal(body, &e); err != nil {
+		return nil
+	}
+	return e.cachedTokens()
+}
+
+// extractStreamCachedTokens is extractCachedTokens for the final
+// include_usage SSE chunk. Call it only on the event extractStreamUsage
+// already identified as the usage chunk.
+func extractStreamCachedTokens(event []byte) *int64 {
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		var e usageEnvelope
+		if err := json.Unmarshal(data, &e); err != nil {
+			continue
+		}
+		if c := e.cachedTokens(); c != nil {
+			return c
+		}
+	}
+	return nil
 }
 
 // extractUsage parses the token counts from a non-streaming vLLM completion

@@ -71,7 +71,7 @@ func ParseServerSpec(spec string) ([]Server, error) {
 		}
 		if a := q.Get("auth"); a != "" {
 			switch a {
-			case AuthModeForward, AuthModeExchange, AuthModeStatic, AuthModeNone:
+			case AuthModeForward, AuthModeExchange, AuthModeStatic, AuthModeNone, AuthModeAttested:
 				s.AuthMode = a
 			default:
 				return nil, fmt.Errorf("entry %q: invalid auth %q", p, a)

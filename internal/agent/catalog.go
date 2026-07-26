@@ -51,6 +51,18 @@ const (
 	// `X-Privasys-On-Behalf-Of: <sub>` header naming the end user, so Drive
 	// runs its read-only, AI-scoped RAG surface for that user.
 	AuthModeAssistant = "assistant"
+	// AuthModeAttested carries NO bearer at all: the callee identifies this
+	// enclave from the attested client certificate presented on the mutual
+	// RA-TLS dial (app id OID 3.6 + code hash OID 3.2, which its enclave-os
+	// verifies and republishes as X-Privasys-Peer-*), and the acting end user
+	// is named by `X-Privasys-On-Behalf-Of`.
+	//
+	// This is the successor to AuthModeAssistant: same delegation shape, but
+	// the caller proves who it is by hardware attestation instead of a shared
+	// secret, so there is no per-tool credential to provision, rotate or leak.
+	// It is the correct mode for any tool whose surface is per-user and whose
+	// server runs on the platform.
+	AuthModeAttested = "attested"
 )
 
 // Server describes a single upstream MCP server the proxy talks to.

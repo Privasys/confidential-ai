@@ -161,6 +161,12 @@ func (d *Dispatcher) authHeader(srv Server, bearer string) string {
 			return ""
 		}
 		return "Assistant " + srv.AssistantToken
+	case AuthModeAttested:
+		// No Authorization header by design: the callee authenticates this
+		// enclave from its attested client certificate, not from anything we
+		// could put in a header. Sending a bearer here would reintroduce
+		// exactly the shared secret this mode exists to remove.
+		return ""
 	default:
 		return ""
 	}
@@ -186,9 +192,12 @@ func onBehalfOfFromCtx(ctx context.Context) string {
 }
 
 // applyExtraToolHeaders sets non-Authorization headers a server's auth mode
-// requires. For the assistant path that is X-Privasys-On-Behalf-Of.
+// requires. Both delegation modes name the acting end user with
+// X-Privasys-On-Behalf-Of; they differ only in how the CALLER proves itself
+// (assistant = shared secret, attested = client certificate).
 func applyExtraToolHeaders(h http.Header, srv Server, ctx context.Context) {
-	if srv.effectiveAuthMode() == AuthModeAssistant {
+	switch srv.effectiveAuthMode() {
+	case AuthModeAssistant, AuthModeAttested:
 		if sub := onBehalfOfFromCtx(ctx); sub != "" {
 			h.Set("X-Privasys-On-Behalf-Of", sub)
 		}

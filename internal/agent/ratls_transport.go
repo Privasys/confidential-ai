@@ -5,9 +5,12 @@ package agent
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -51,11 +54,33 @@ type RATLSTransport struct {
 	// enclave that was redeployed with different code since the user
 	// admitted it fails closed. Hosts without an entry are not pinned.
 	ExpectedDigests map[string]string
+
+	// getClientCert presents THIS enclave's attested client certificate when
+	// a tool enclave asks for one (ingress mutual RA-TLS on the callee).
+	// Built once and reused: the callback mints a fresh certificate per
+	// connection, bound to that handshake's channel binder. Nil off platform
+	// (no manager to mint from), which leaves the dial server-auth only —
+	// exactly today's behaviour, so a tool that does not require a client
+	// certificate is unaffected.
+	//
+	// This is what lets a callee identify the CALLER by attestation instead
+	// of a shared secret: the minted certificate carries this workload's app
+	// id (OID 3.6) and code hash (OID 3.2), which the callee's enclave-os
+	// verifies and republishes as X-Privasys-Peer-*.
+	getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 }
 
 // NewRATLSTransport returns a RoundTripper with sane defaults.
 func NewRATLSTransport() *RATLSTransport {
-	return &RATLSTransport{Timeout: 15 * time.Second}
+	t := &RATLSTransport{Timeout: 15 * time.Second}
+	if mgrURL := os.Getenv("PRIVASYS_MANAGER_URL"); mgrURL != "" {
+		if _, getCert, err := rc.EgressClientCert(mgrURL, os.Getenv("PRIVASYS_CONTAINER_TOKEN")); err != nil {
+			log.Printf("[agent] egress client identity unavailable, tool dials stay server-auth only: %v", err)
+		} else {
+			t.getClientCert = getCert
+		}
+	}
+	return t
 }
 
 func (t *RATLSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -91,6 +116,9 @@ func (t *RATLSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		ServerName: host,
 		Timeout:    timeout,
 		Challenge:  nonce,
+		// Mutual leg: answer a callee that requires an attested client
+		// certificate. Nil off platform, leaving the dial server-auth only.
+		GetClientCertificate: t.getClientCert,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls: connect %s: %w", host, err)

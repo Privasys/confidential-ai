@@ -10,7 +10,7 @@ import (
 // Preflight (OPTIONS) requests are short-circuited with 204 No Content.
 //
 // allowOrigins is a comma-separated list of full Origin values
-// (scheme://host[:port]), e.g. "https://chat.privasys.org,https://chat-test.privasys.org".
+// (scheme://host[:port]), e.g. "https://chat.privasys.org,https://chat.test.privasys.org".
 // An empty list disables CORS entirely.
 func CORS(allowOrigins string, next http.Handler) http.Handler {
 	allow := map[string]struct{}{}

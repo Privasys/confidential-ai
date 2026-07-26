@@ -269,7 +269,7 @@ func Parse(args []string) (*Config, error) {
 		"When set, verify X-Privasys-Tool-Grant against this JWKS and union the grant's tools per request (env: TOOL_GRANT_JWKS_URL)")
 	fs.StringVar(&cfg.ToolGrantAudience, "tool-grant-audience", envOr("TOOL_GRANT_AUDIENCE", ""),
 		"Expected aud claim on a tool-grant (this instance's id); empty skips the check (env: TOOL_GRANT_AUDIENCE)")
-	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat-test.privasys.org,http://localhost:4210,http://localhost:3000"),
+	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat.test.privasys.org,http://localhost:4210,http://localhost:3000"),
 		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
 
 	fs.StringVar(&cfg.BillingAccountID, "billing-account-id", envOr("BILLING_ACCOUNT_ID", ""),

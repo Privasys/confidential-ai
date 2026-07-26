@@ -201,6 +201,62 @@ func TestResolveCaller(t *testing.T) {
 	}
 }
 
+// TestResolveCaller_AttestedPeer proves the ingress mutual-RA-TLS path: a
+// caller the enclave manager verified (attested client cert → allowed-callers
+// policy → X-Privasys-Peer-* headers) is admitted as "app:<app-id>", so an
+// attested sibling app needs no bearer token at all. This is what retires the
+// shared embeddings_api_key on the Drive→CAI leg.
+//
+// The forged-header case is the important one: the manager STRIPS this
+// namespace from every request that did not pass verification, so a verdict
+// header without the manager's own "true" marker must grant nothing.
+func TestResolveCaller_AttestedPeer(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	// Verified attested caller, no token: identified as the app.
+	r := httptest.NewRequest("POST", "/v1/embeddings", nil)
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "cf7a0d585468416884c341ebe0ce4025")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "app:cf7a0d585468416884c341ebe0ce4025" {
+		t.Fatalf("attested peer: sub=%q err=%v", sub, err)
+	}
+
+	// Not verified (or verdict absent): no identity is granted.
+	for _, hdrs := range []map[string]string{
+		{peerAppIDHeader: "cf7a0d585468416884c341ebe0ce4025"},                              // id without verdict
+		{peerVerifiedHeader: "false", peerAppIDHeader: "cf7a0d585468416884c341ebe0ce4025"}, // explicit false
+		{peerVerifiedHeader: "true"},                                                       // verdict without id
+	} {
+		r = httptest.NewRequest("POST", "/v1/embeddings", nil)
+		for k, v := range hdrs {
+			r.Header.Set(k, v)
+		}
+		if sub, err := h.resolveCaller(r); err != nil || sub != "" {
+			t.Fatalf("unverified peer %v must stay anonymous: sub=%q err=%v", hdrs, sub, err)
+		}
+	}
+
+	// An explicit token still wins over the peer identity (a human calling
+	// through an attested app is billed as the human).
+	tok := mint(map[string]any{"iss": issuer, "sub": "token-user", "exp": float64(time.Now().Add(time.Hour).Unix())})
+	r = httptest.NewRequest("POST", "/v1/embeddings", nil)
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "cf7a0d585468416884c341ebe0ce4025")
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if sub, err := h.resolveCaller(r); err != nil || sub != "token-user" {
+		t.Fatalf("token precedence over peer: sub=%q err=%v", sub, err)
+	}
+
+	// End-to-end: the attested peer passes mandatory inference auth.
+	r = httptest.NewRequest("POST", "/v1/embeddings", nil)
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "cf7a0d585468416884c341ebe0ce4025")
+	if _, ok := h.authorizeInference(httptest.NewRecorder(), r); !ok {
+		t.Fatal("attested peer must satisfy mandatory inference auth")
+	}
+}
+
 func TestResolveCaller_SealedRelaySub(t *testing.T) {
 	issuer, mint := jwksTestIDP(t)
 	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}

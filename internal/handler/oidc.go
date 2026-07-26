@@ -74,6 +74,16 @@ func callerFromContext(ctx context.Context) string {
 // header, mandatory inference auth 401s every sealed chat turn.
 const relaySubHeader = "X-Privasys-Sub"
 
+// Ingress mutual RA-TLS peer identity, asserted by the enclave manager after
+// verifying the caller's attested client certificate against this app's
+// allowed-callers policy (enclave-os-virtual internal/manager/peerverify.go).
+// The manager strips these headers from every request that did not pass that
+// verification, so their presence is trustworthy inside the enclave.
+const (
+	peerVerifiedHeader = "X-Privasys-Peer-Verified"
+	peerAppIDHeader    = "X-Privasys-Peer-App-Id"
+)
+
 // resolveCaller extracts the end-user credential from X-App-Auth (the proxied
 // path, forwarded by the management-service) or the Authorization bearer (a
 // direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
@@ -95,6 +105,18 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 	if tok == "" {
 		if sub := strings.TrimSpace(r.Header.Get(relaySubHeader)); sub != "" {
 			return sub, nil // sealed transport: wallet-vouched, relay-asserted
+		}
+		// Ingress mutual RA-TLS (app-to-app): the enclave manager verified the
+		// caller's attested client certificate (quote, measurements, allowed-
+		// callers policy, channel binder) and asserted its identity in these
+		// headers — which it strips from every non-verified path, so they
+		// cannot be spoofed from outside. The caller is the attested APP, not
+		// a wallet user; the "app:" prefix keeps the subject space disjoint
+		// from pairwise user subs for metering and billing.
+		if r.Header.Get(peerVerifiedHeader) == "true" {
+			if id := strings.TrimSpace(r.Header.Get(peerAppIDHeader)); id != "" {
+				return "app:" + id, nil
+			}
 		}
 		return "", nil // anonymous
 	}

@@ -204,6 +204,53 @@ func applyExtraToolHeaders(h http.Header, srv Server, ctx context.Context) {
 	}
 }
 
+// SettingsRoundTrip proxies a per-user tool-settings request (GET or PUT
+// on <base>/api/v1/mcp/settings) to the named server, over the same
+// transport and auth mode as tool calls — attested servers get the mutual
+// RA-TLS client and no bearer; the acting user rides in
+// X-Privasys-On-Behalf-Of (from WithOnBehalfOf on ctx). The tool server is
+// the sole authority on the settings document; this function forwards
+// status + body verbatim so a client renders exactly what the attested
+// tool served.
+//
+// Only privasys_http servers can advertise a settings surface (the
+// descriptor rides that catalogue payload), so other transports refuse.
+func (d *Dispatcher) SettingsRoundTrip(ctx context.Context, serverName, method string, body []byte) (int, []byte, error) {
+	srv, ok := d.catalog.Server(serverName)
+	if !ok {
+		return 0, nil, fmt.Errorf("unknown MCP server %q", serverName)
+	}
+	if srv.Transport == TransportMCPSSE {
+		return 0, nil, fmt.Errorf("server %q has no settings surface (transport %s)", serverName, srv.Transport)
+	}
+	url := strings.TrimRight(srv.BaseURL, "/") + "/api/v1/mcp/settings"
+	var rd io.Reader
+	if len(body) > 0 {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, rd)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if auth := d.authHeader(srv, ""); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	applyExtraToolHeaders(req.Header, srv, ctx)
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 // callSSE dispatches via the persistent MCP-over-SSE client.
 func (d *Dispatcher) callSSE(ctx context.Context, qualifiedName string, srv Server, tool string, args json.RawMessage, bearer string, started time.Time) ToolResult {
 	cli := d.catalog.sseClient(srv)

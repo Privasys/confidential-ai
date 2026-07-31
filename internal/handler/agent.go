@@ -668,14 +668,25 @@ func addToolCallsToMeta(meta *reproducibility.Metadata, results []agent.ToolResu
 	meta.ToolCalls = out
 }
 
+// toolsHeaderNone is the X-Privasys-Tools sentinel for "no tools at all".
+// Without it the header cannot express all-off: a client that removed
+// every server would send an empty header, and empty means default-on —
+// so switching the last tool off silently re-enabled everything.
+// (Reserved name: a fleet must not register an MCP server called "none".)
+const toolsHeaderNone = "none"
+
 // filterToolsByHeader trims the catalogue to only the servers named in
 // the X-Privasys-Tools header (comma-separated). An empty header keeps
-// every server (default-on behaviour preserved). Unknown server names
-// in the header are silently dropped.
+// every server (default-on behaviour preserved); the "none" sentinel
+// disables every server. Unknown server names in the header are silently
+// dropped.
 func filterToolsByHeader(tools []agent.Tool, header string) []agent.Tool {
 	header = strings.TrimSpace(header)
 	if header == "" {
 		return tools
+	}
+	if strings.EqualFold(header, toolsHeaderNone) {
+		return nil
 	}
 	allowed := map[string]bool{}
 	for _, name := range strings.Split(header, ",") {

@@ -379,6 +379,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/served-models", h.servedModels)
 	mux.HandleFunc("GET /metrics", h.metrics)
 	mux.HandleFunc("POST /v1/agent/confirm/{id}", h.agentConfirm)
+	mux.HandleFunc("GET /v1/tools", h.toolServers)
+	mux.HandleFunc("GET /v1/tools/{server}/settings", h.toolSettings)
+	mux.HandleFunc("PUT /v1/tools/{server}/settings", h.toolSettings)
 	mux.HandleFunc("POST /configure", h.configure)
 }
 

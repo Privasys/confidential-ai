@@ -173,6 +173,12 @@ type Catalog struct {
 	lastFetch time.Time
 	cached    []Tool
 	cachedErr error
+	// settings caches each server's advertised tool-settings descriptor
+	// (the static `settings` object in the privasys_http catalogue payload:
+	// title/icon/description). A server present here has a per-user
+	// settings surface at <base>/api/v1/mcp/settings that chat clients
+	// render generically (see Dispatcher.SettingsRoundTrip).
+	settings map[string]json.RawMessage
 
 	sseMu      sync.Mutex
 	sseClients map[string]*mcpsse.Client
@@ -242,6 +248,7 @@ func (c *Catalog) Replace(servers []Server) {
 	c.lastFetch = time.Time{}
 	c.cached = nil
 	c.cachedErr = nil
+	c.settings = nil
 	c.mu.Unlock()
 	c.Close()
 }
@@ -259,12 +266,16 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 	}
 
 	var (
-		all   []Tool
-		errs  []string
-		anyOK bool
+		all      []Tool
+		errs     []string
+		anyOK    bool
+		settings = map[string]json.RawMessage{}
 	)
 	for _, s := range c.servers {
-		tools, err := c.fetchTools(ctx, s)
+		tools, sd, err := c.fetchTools(ctx, s)
+		if len(sd) > 0 {
+			settings[s.Name] = sd
+		}
 		if err != nil {
 			// Loud per-server: a failing server otherwise just vanishes
 			// from the model's tool list ("I don't have that tool") with
@@ -279,12 +290,34 @@ func (c *Catalog) Tools(ctx context.Context) ([]Tool, error) {
 
 	c.lastFetch = time.Now()
 	c.cached = all
+	c.settings = settings
 	if !anyOK && len(errs) > 0 {
 		c.cachedErr = errors.New(strings.Join(errs, "; "))
 	} else {
 		c.cachedErr = nil
 	}
 	return c.cached, c.cachedErr
+}
+
+// SettingsDescriptors returns the per-server tool-settings descriptors
+// (server name -> the static settings object from its catalogue). Drives a
+// Tools() refresh first so the result reflects the live catalogue.
+func (c *Catalog) SettingsDescriptors(ctx context.Context) map[string]json.RawMessage {
+	_, _ = c.Tools(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]json.RawMessage, len(c.settings))
+	for k, v := range c.settings {
+		out[k] = v
+	}
+	return out
+}
+
+// HasSettings reports whether the named server advertises a per-user
+// settings surface in its catalogue.
+func (c *Catalog) HasSettings(ctx context.Context, server string) bool {
+	_, ok := c.SettingsDescriptors(ctx)[server]
+	return ok
 }
 
 // Server looks up a configured server by name.
@@ -359,9 +392,12 @@ func (c *Catalog) Tool(qualifiedName string) (Tool, bool) {
 	return Tool{}, false
 }
 
-func (c *Catalog) fetchTools(ctx context.Context, s Server) ([]Tool, error) {
+func (c *Catalog) fetchTools(ctx context.Context, s Server) ([]Tool, json.RawMessage, error) {
 	if s.Transport == TransportMCPSSE {
-		return c.fetchToolsSSE(ctx, s)
+		tools, err := c.fetchToolsSSE(ctx, s)
+		// No settings surface over MCP-SSE: the descriptor rides the
+		// privasys_http catalogue payload only.
+		return tools, nil, err
 	}
 	return fetchToolsPrivasysHTTP(ctx, c.client, s)
 }
@@ -385,26 +421,30 @@ func (c *Catalog) fetchToolsSSE(ctx context.Context, s Server) ([]Tool, error) {
 	return out, nil
 }
 
-func fetchToolsPrivasysHTTP(ctx context.Context, client *http.Client, s Server) ([]Tool, error) {
+func fetchToolsPrivasysHTTP(ctx context.Context, client *http.Client, s Server) ([]Tool, json.RawMessage, error) {
 	url := strings.TrimRight(s.BaseURL, "/") + "/api/v1/mcp/tools"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
 		Tools []Tool `json:"tools"`
+		// Optional: the server's static tool-settings descriptor
+		// (title/icon/description) advertising a per-user settings surface
+		// at <base>/api/v1/mcp/settings.
+		Settings json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range payload.Tools {
 		payload.Tools[i].Server = s.Name
@@ -412,5 +452,5 @@ func fetchToolsPrivasysHTTP(ctx context.Context, client *http.Client, s Server) 
 			payload.Tools[i].RequiresUserConfirmation = true
 		}
 	}
-	return payload.Tools, nil
+	return payload.Tools, payload.Settings, nil
 }

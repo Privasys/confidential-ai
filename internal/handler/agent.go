@@ -291,6 +291,7 @@ func (h *Handler) chatCompletionsAgentic(w http.ResponseWriter, r *http.Request)
 	meta := h.buildMetadata(reqParams)
 	meta.DynamicContext = dynCtx
 	meta.KVCacheMode = kvMode
+	meta.DependencySetFold = h.dependencyFold()
 	// Cache hits of the FINAL tool-loop turn. In strict mode earlier
 	// iterations of this same request may still hit their own blocks (the
 	// salt is per-request, so intra-request reuse is symmetric under

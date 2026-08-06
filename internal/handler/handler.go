@@ -44,6 +44,11 @@ type Handler struct {
 	// cache_salt.go). Per-process: the prefix cache dies with the vLLM
 	// engine this proxy supervises, so the key never needs to persist.
 	saltKey []byte
+
+	// depSet is the runtime-declared attested dependency set (OID 6.1) this
+	// enclave enforces its tool dials against. Nil when the agentic path is
+	// disabled; disabled (no-op) off platform.
+	depSet *agent.DepSet
 	// fleet coordinates the vLLM instances (generate + embed + rerank).
 	// nil in legacy mode (vLLM started by entrypoint.sh, single model).
 	fleet *models.Fleet
@@ -169,7 +174,17 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 		catClient := &http.Client{Timeout: 15 * time.Second}
 		dispClient := &http.Client{Timeout: 60 * time.Second}
 		if cfg.MCPRATLS {
-			var rt http.RoundTripper = agent.NewRATLSTransport()
+			base := agent.NewRATLSTransport()
+			// Attested dependency set (OID 6.1): the pins the RUNTIME
+			// declares for this workload, which are exactly what our own
+			// serving certificate advertises. Loaded from the local manager
+			// and refreshed so an operator-approved change takes effect
+			// without a restart. Disabled off platform, where the per-host
+			// digest pins below remain the only gate.
+			h.depSet = agent.NewDepSet()
+			h.depSet.Start(time.Minute)
+			base.Deps = h.depSet
+			var rt http.RoundTripper = base
 			// Pin the built-in Drive server to its attested digest on the
 			// shared transport (other hosts pass through unpinned).
 			if driveSrv != nil && driveSrv.ExpectedDigest != "" {
@@ -952,6 +967,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	)
 	meta.DynamicContext = dynCtx
 	meta.KVCacheMode = kvMode
+	meta.DependencySetFold = h.dependencyFold()
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
@@ -984,6 +1000,17 @@ func (m *meterCtx) record(requestID string, in, out int64) {
 		return
 	}
 	m.reporter.Record(requestID, m.caller, m.model, in, out)
+}
+
+// dependencyFold returns the identity fold of the attested dependency set
+// this enclave is enforcing, or "" when none is declared. Stamped into every
+// reproducibility block so a response commits to the tool surface that
+// served it, not just to the model.
+func (h *Handler) dependencyFold() string {
+	if h.depSet == nil {
+		return ""
+	}
+	return h.depSet.Fold()
 }
 
 // wantsReproducibility reports whether the caller opted in to the

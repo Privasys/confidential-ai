@@ -55,6 +55,15 @@ type RATLSTransport struct {
 	// admitted it fails closed. Hosts without an entry are not pinned.
 	ExpectedDigests map[string]string
 
+	// Deps is the runtime-declared attested dependency set (OID 6.1). When
+	// it is enabled, EVERY tool dial must match a declared entry — measured
+	// identity + required OIDs — so what this enclave advertises on its own
+	// leaf is exactly what it will talk to. The per-host digest pin above
+	// still applies on top (a grant admits a specific build), giving one
+	// verifier with two pin sources. Nil / disabled keeps the pre-6.1
+	// behaviour: digest pins only.
+	Deps *DepSet
+
 	// getClientCert presents THIS enclave's attested client certificate when
 	// a tool enclave asks for one (ingress mutual RA-TLS on the callee).
 	// Built once and reused: the callback mints a fresh certificate per
@@ -138,6 +147,20 @@ func (t *RATLSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if _, verr := cli.VerifyCertificate(policy); verr != nil {
 		cli.Close()
 		return nil, fmt.Errorf("ratls: %s attestation failed — refusing to send tool data: %w", host, verr)
+	}
+
+	// Declared-dependency gate: the peer must BE one of the dependencies
+	// this workload advertises at OID 6.1 (app-id selects the entry, then
+	// measurement any-of + required OIDs must all hold). Fails closed, and
+	// refuses a peer whose app-id we never declared — so a catalogue or
+	// control plane that starts pointing a tool at an unpinned host cannot
+	// move our traffic there.
+	if t.Deps != nil {
+		grantPinned := t.ExpectedDigests[strings.ToLower(host)] != ""
+		if derr := t.Deps.VerifyPeer(info, teeFromOID(oid), grantPinned); derr != nil {
+			cli.Close()
+			return nil, fmt.Errorf("ratls: %s failed the declared-dependency gate — refusing to send tool data: %w", host, derr)
+		}
 	}
 
 	// Per-host workload pinning: the attested leaf must carry the exact

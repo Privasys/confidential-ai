@@ -118,16 +118,41 @@ func (d *DepSet) Refresh() error {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fmt.Errorf("dependency set: parse: %w", err)
 	}
+	next := rc.DependencySet{}
+	if payload.Dependencies != nil {
+		next = *payload.Dependencies
+	}
+
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	prevFold, prevLoaded := "", d.loaded
+	if prevLoaded && len(d.set.Entries) > 0 {
+		prevFold = rc.FoldIdentityHex(nil, nil, d.set)
+	}
 	d.loaded = true
 	d.fetched = time.Now()
-	if payload.Dependencies == nil {
-		d.set = rc.DependencySet{}
-	} else {
-		d.set = *payload.Dependencies
+	d.set = next
+	nextFold := ""
+	if len(next.Entries) > 0 {
+		nextFold = rc.FoldIdentityHex(nil, nil, next)
+	}
+	d.mu.Unlock()
+
+	// Audit line on every CHANGE of the declared surface: an operator
+	// sign-off re-mints our certificate and swaps what this enclave will
+	// talk to, so the container log should say so — with the fold that ends
+	// up in each response's reproducibility block.
+	if prevLoaded && prevFold != nextFold {
+		log.Printf("[deps] declared dependency set CHANGED: %d entries, fold %s -> %s",
+			len(next.Entries), orNone(prevFold), orNone(nextFold))
 	}
 	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 // Start loads the set once and refreshes it on an interval, so an

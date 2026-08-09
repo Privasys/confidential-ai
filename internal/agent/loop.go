@@ -117,31 +117,7 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 			if !assistantContentIsEmpty(assistantMsg) {
 				return respBody, allResults, nil
 			}
-			messages, _ := req["messages"].([]any)
-			// Use role=user (not system) for the reprompt: Qwen3's
-			// chat template throws "System message must be at the
-			// beginning" if a system message appears after the first
-			// turn, which would make the reprompt fail and the user
-			// see an empty assistant reply.
-			messages = append(messages, assistantMsg, map[string]any{
-				"role":    "user",
-				"content": "Your previous reply contained only internal reasoning (inside <think>…</think>) and no user-visible answer. Reply again with a concise, user-facing final answer in plain Markdown. Do NOT use <think> tags this time — just the answer.",
-			})
-			req["messages"] = messages
-			delete(req, "tools")
-			delete(req, "tool_choice")
-			finalBody, ferr := json.Marshal(req)
-			if ferr != nil {
-				return nil, allResults, fmt.Errorf("marshal reprompt: %w", ferr)
-			}
-			respBody2, ierr := opt.Invoke(ctx, finalBody)
-			if ierr != nil {
-				// Reprompt failed — return the original (possibly
-				// empty) response rather than swallowing the
-				// model output entirely.
-				return respBody, allResults, nil
-			}
-			return respBody2, allResults, nil
+			return repromptForVisibleAnswer(ctx, opt, req, assistantMsg, respBody, allResults)
 		}
 
 		// Append the assistant message (with tool_calls) to history.
@@ -264,7 +240,53 @@ func Run(ctx context.Context, dispatcher *Dispatcher, body []byte, opt LoopOptio
 	if err != nil {
 		return nil, allResults, fmt.Errorf("vllm final invoke: %w", err)
 	}
+	// The forced summarise hits the same think-only failure mode as the
+	// mid-loop path — after a long tool run the model is MORE likely to
+	// burn its budget reasoning over the accumulated results and emit
+	// empty content (seen live 2026-08-09: 8 web calls, no answer). Give
+	// it the same one-shot reprompt so the user always gets a final
+	// answer.
+	if _, assistantMsg, perr := parseToolCalls(respBody); perr == nil && assistantContentIsEmpty(assistantMsg) {
+		return repromptForVisibleAnswer(ctx, opt, req, assistantMsg, respBody, allResults)
+	}
 	return respBody, allResults, nil
+}
+
+// repromptForVisibleAnswer runs one extra no-tools call telling the model to
+// answer WITHOUT <think> tags. Known failure mode for thinking models like
+// Qwen3: the entire answer lands inside <think>…</think> with nothing after
+// the closing tag, so `content == ""` reaches the user as a silent blank
+// turn. On any reprompt failure the ORIGINAL response is returned rather
+// than swallowing the model output entirely.
+//
+// The reprompt uses role=user (not system): Qwen3's chat template throws
+// "System message must be at the beginning" if a system message appears
+// after the first turn.
+func repromptForVisibleAnswer(
+	ctx context.Context,
+	opt LoopOptions,
+	req map[string]any,
+	assistantMsg map[string]any,
+	respBody []byte,
+	allResults []ToolResult,
+) ([]byte, []ToolResult, error) {
+	messages, _ := req["messages"].([]any)
+	messages = append(messages, assistantMsg, map[string]any{
+		"role":    "user",
+		"content": "Your previous reply contained only internal reasoning (inside <think>…</think>) and no user-visible answer. Reply again with a concise, user-facing final answer in plain Markdown. Do NOT use <think> tags this time — just the answer.",
+	})
+	req["messages"] = messages
+	delete(req, "tools")
+	delete(req, "tool_choice")
+	finalBody, ferr := json.Marshal(req)
+	if ferr != nil {
+		return nil, allResults, fmt.Errorf("marshal reprompt: %w", ferr)
+	}
+	respBody2, ierr := opt.Invoke(ctx, finalBody)
+	if ierr != nil {
+		return respBody, allResults, nil
+	}
+	return respBody2, allResults, nil
 }
 
 // toolResultEvent wraps a ToolResult with the originating tool_call id

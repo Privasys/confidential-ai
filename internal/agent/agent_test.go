@@ -390,3 +390,68 @@ t.Fatalf("event[%d] = %s, want %s", i, events[i], w)
 }
 }
 }
+
+// TestRun_CapReached_EmptyFinal_Reprompts covers the cap-exhaustion path:
+// after MaxIterations of tool calls the loop forces a no-tools summarise,
+// and when THAT reply is think-only (empty content) the loop must reprompt
+// once more — otherwise the user sees a long tool run end in a silent blank
+// turn (seen live 2026-08-09: 8 web calls, no answer).
+func TestRun_CapReached_EmptyFinal_Reprompts(t *testing.T) {
+	f := &fakeMCP{
+		tools: []Tool{{Name: "search"}},
+		answer: func(_ string, _ []byte, _ string) (int, []byte) {
+			return 200, []byte(`{"ok":true}`)
+		},
+	}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	cat := NewCatalog([]Server{{Name: "rag", BaseURL: srv.URL}}, nil, time.Hour)
+	cat.Tools(context.Background())
+	d := NewDispatcher(cat, nil)
+
+	toolCallResp := []byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"rag__search","arguments":"{\"query\":\"q\"}"}}]}}]}`)
+	calls := 0
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"q"}]}`)
+	final, _, err := Run(context.Background(), d, body, LoopOptions{
+		MaxIterations: 2,
+		Invoke: func(_ context.Context, b []byte) ([]byte, error) {
+			calls++
+			switch calls {
+			case 1, 2:
+				return toolCallResp, nil
+			case 3:
+				// Forced summarise: no tools allowed, and the model
+				// returns empty content (think-only failure mode).
+				var req map[string]any
+				if err := json.Unmarshal(b, &req); err != nil {
+					t.Fatal(err)
+				}
+				if _, hasTools := req["tools"]; hasTools {
+					t.Fatal("cap-reached final call must not carry tools")
+				}
+				return []byte(`{"choices":[{"message":{"role":"assistant","content":"  "}}]}`), nil
+			default:
+				// The reprompt: must end with a role=user instruction.
+				var req map[string]any
+				if err := json.Unmarshal(b, &req); err != nil {
+					t.Fatal(err)
+				}
+				msgs, _ := req["messages"].([]any)
+				last, _ := msgs[len(msgs)-1].(map[string]any)
+				if last["role"] != "user" {
+					t.Fatalf("reprompt must be role=user, got %v", last["role"])
+				}
+				return []byte(`{"choices":[{"message":{"role":"assistant","content":"It will be 31°C in Lisbon."}}]}`), nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 {
+		t.Fatalf("expected 4 invokes (2 loop + final + reprompt), got %d", calls)
+	}
+	if !strings.Contains(string(final), "Lisbon") {
+		t.Fatalf("final should be the reprompted answer: %s", final)
+	}
+}

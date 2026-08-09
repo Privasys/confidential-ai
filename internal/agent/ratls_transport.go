@@ -190,9 +190,12 @@ func (t *RATLSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("ratls: read request body: %w", err)
 		}
 	}
-	bearer := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-
-	resp, err := cli.HTTPDo(req.Method, req.URL.RequestURI(), host, body, bearer)
+	// Forward the caller's FULL header set: the delegation protocol rides on
+	// custom headers (X-Privasys-On-Behalf-Of names the acting user to the
+	// tool), and the old bearer-only HTTPDo silently dropped them — Drive
+	// refused every agent-loop tool call with "missing on-behalf-of subject"
+	// while the catalogue (no headers needed) worked, masking the bug.
+	resp, err := cli.HTTPDoHeader(req.Method, req.URL.RequestURI(), host, body, req.Header)
 	if err != nil {
 		cli.Close()
 		return nil, fmt.Errorf("ratls: %s %s: %w", req.Method, host, err)

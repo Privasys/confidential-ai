@@ -41,12 +41,19 @@ RUN CGO_ENABLED=0 go build -tags ratls -trimpath -ldflags="-s -w -X github.com/p
 # (FlashInfer top-k/top-p sampler).
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
-# vLLM v0.22.1 — adds `--performance-mode`, Qwen3-Next MTP speculative
-# decoding (`{"method":"qwen3_next_mtp"}`), configurable CUDA-graph
-# capture size, and expanded mamba-ssm-cache-dtype handling for hybrid
-# (Gated DeltaNet) models. v0.21.0 introduced Qwen3.5/3.6 GDN support;
-# v0.20.0 introduced the Gemma 4 reasoning + tool-call parsers.
-# Release: https://github.com/vllm-project/vllm/releases/tag/v0.22.1
+# vLLM v0.27.1 — five releases past our previous v0.22.1 pin. What we
+# upgrade FOR: Model Runner V2 prefix caching for hybrid Mamba/GDN
+# models (#42406) with PARTIAL prefix-cache hits (#46384) and
+# retention policies (#45845) — replacing the experimental
+# mamba_cache_mode=align full-block-only hits — plus Qwen3.5/3.6 GDN
+# decode optimizations (mixed prefill+decode split routing #44700,
+# fewer host syncs in hybrid Mamba #49736). Also the version the
+# upstream GDN batch-invariance work (PRs #45819/#49827) targets, so
+# adopting it later is a wheel bump, not an engine jump.
+# Flag audit 2026-08-23: every flag buildVLLMArgs emits exists at this
+# tag (arg_utils.py + openai/cli_args.py); the args vLLM removed
+# (max_num_partial_prefills #49244) we never used.
+# Release: https://github.com/vllm-project/vllm/releases/tag/v0.27.1
 # Recipe:  https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3.5.html
 #
 # CUDA pinning: vLLM publishes two x86_64 GPU wheels per release on
@@ -56,11 +63,8 @@ FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 # want to stay on CUDA 12.x, so we install the +cu129 wheel directly
 # from the GitHub release and pair it with the cu129 PyTorch backend
 # (binary-compatible with the cu126 base — torch ships its own bundled
-# libcudart.so.12).
-# Note: v0.22.x wheels moved their manylinux tag back from `_2_34`
-# (v0.21.0) to `_2_28`. Ubuntu 24.04 ships glibc 2.39, which satisfies
-# either. Installing plain `vllm==0.22.1` resolves to the CUDA 13
-# default wheel and crashes at import with
+# libcudart.so.12). Installing plain `vllm==0.27.1` resolves to the
+# CUDA 13 default wheel and crashes at import with
 # `ImportError: libcudart.so.13: cannot open shared object file`.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -70,9 +74,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 
+# flashinfer-cubin (a hard dep of flashinfer-python >= 0.6.14) is not on
+# PyPI; vLLM's own requirements/cuda.txt resolves it from the FlashInfer
+# wheel index, so we must pass the same extra index here.
+#
+# flashinfer-jit-cache ships the PRE-COMPILED kernel variants that
+# flashinfer would otherwise nvcc-JIT at first inference (~66 .cu files,
+# ~8 min on our H100 — the cold-start that blew the 25-min generate
+# readiness cap on 2026-08-08). Pinned by exact wheel URL (per-CUDA
+# build, matching flashinfer-python==0.6.16.post3 from vLLM's
+# requirements) so the kernel set is part of the image digest.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu129 \
-      "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_x86_64.whl"
+      --extra-index-url https://flashinfer.ai/whl/ \
+      "https://github.com/vllm-project/vllm/releases/download/v0.27.1/vllm-0.27.1+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
 
 # Bake the official Gemma 4 chat template into the image so the
 # manager can reference it by short name (--chat-template gemma4
@@ -80,7 +96,7 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 # reproducibility.
 RUN mkdir -p /opt/vllm-templates && \
     curl -fsSL -o /opt/vllm-templates/tool_chat_template_gemma4.jinja \
-      https://raw.githubusercontent.com/vllm-project/vllm/v0.22.1/examples/tool_chat_template_gemma4.jinja
+      https://raw.githubusercontent.com/vllm-project/vllm/v0.27.1/examples/tool_chat_template_gemma4.jinja
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
@@ -105,7 +121,7 @@ ENV MODELS_DIR=/models
 # the wheel. (The running server is always correct — vLLM's
 # system_fingerprint comes from the wheel itself — but our attestation
 # metadata must match it.)
-ENV VLLM_VERSION=0.22.1
+ENV VLLM_VERSION=0.27.1
 ENV CUDA_VERSION=12.6.3
 
 # Disable DeepGEMM FP8 JIT path. vLLM v0.21.0+ ships bundled DeepGEMM
@@ -118,6 +134,9 @@ ENV CUDA_VERSION=12.6.3
 # kernels for the variants it enables by default), force vLLM to use
 # its CUTLASS/Triton FP8 backends instead, which work out of the box.
 # Cost: ~10–20% throughput on FP8 MoE; correctness unchanged.
+# Deliberately KEPT for the 0.27.1 roll (both envs still honored at
+# that tag): a 5-version engine bump is not the moment to also change
+# the FP8 kernel provider. Re-evaluate separately once 0.27.1 soaks.
 ENV VLLM_USE_DEEP_GEMM=0
 ENV VLLM_MOE_USE_DEEP_GEMM=0
 

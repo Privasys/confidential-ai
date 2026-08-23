@@ -152,8 +152,8 @@ is loaded.
 
 ## Reasoning & tool calling
 
-`Dockerfile.prod` pins **vLLM v0.22.1** (release notes:
-[vllm-project/vllm v0.22.1](https://github.com/vllm-project/vllm/releases/tag/v0.22.1)),
+`Dockerfile.prod` pins **vLLM v0.27.1** (release notes:
+[vllm-project/vllm v0.27.1](https://github.com/vllm-project/vllm/releases/tag/v0.27.1)),
 which ships first-class reasoning and tool-call parsers for both Gemma 4
 and Qwen3.6, plus Qwen3-Next MTP speculative decoding and
 `--performance-mode`.

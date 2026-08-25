@@ -187,3 +187,23 @@ func TestStderrTailSuffix(t *testing.T) {
 		t.Fatalf("fallback should be last non-noise line, got %q", got)
 	}
 }
+
+// Text-only serving is the default: the generate task must pass
+// --language-model-only (vLLM >= 0.27 zeroes every modality limit and skips
+// the vision encoder-cache profiling that memcg-killed the EngineCore on
+// m4, 2026-08-24). Opting back in via enable_multimodal removes it; non-
+// generate tasks never carry it.
+func TestBuildVLLMArgs_LanguageModelOnly(t *testing.T) {
+	req := LoadRequest{Task: TaskGenerate, Model: "m", Dtype: "auto", MaxModelLen: 4096, GPUMemoryUtilization: 0.9}
+	if args := buildVLLMArgs(req, "/models/m", 8000); !slices.Contains(args, "--language-model-only") {
+		t.Fatalf("generate must default to --language-model-only: %v", args)
+	}
+	req.EnableMultimodal = true
+	if args := buildVLLMArgs(req, "/models/m", 8000); slices.Contains(args, "--language-model-only") {
+		t.Fatalf("enable_multimodal must drop the flag: %v", args)
+	}
+	embed := LoadRequest{Task: TaskEmbed, Model: "e", Dtype: "auto", MaxModelLen: 4096, GPUMemoryUtilization: 0.05}
+	if args := buildVLLMArgs(embed, "/models/e", 8001); slices.Contains(args, "--language-model-only") {
+		t.Fatalf("non-generate tasks must not carry the flag: %v", args)
+	}
+}

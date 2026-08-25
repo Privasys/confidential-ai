@@ -168,6 +168,17 @@ type LoadRequest struct {
 	// is_original_qwen3_reranker); explicit values win, as with the
 	// parser auto-recipes.
 	HFOverrides string `json:"hf_overrides,omitempty"`
+
+	// EnableMultimodal keeps vLLM's multimodal input processing enabled
+	// for VL-architecture checkpoints. Default FALSE → we pass
+	// `--language-model-only` (vLLM >= 0.27), which zeroes every modality
+	// limit and skips the vision encoder-cache profiling. That profiling
+	// is not free-to-ignore: on v0.27.1 it allocates max-feature-size
+	// image buffers AFTER weight load, and on the H100 deployment it
+	// killed the EngineCore silently (memcg, no CUDA OOM in the log) —
+	// first observed bringing up cai-next on m4, 2026-08-24. We serve
+	// text-only; a future vision deployment sets this true explicitly.
+	EnableMultimodal bool `json:"enable_multimodal,omitempty"`
 }
 
 // Status is the response for GET /v1/models/status.
@@ -913,6 +924,9 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 	if req.EnablePrefixCaching {
 		args = append(args, "--enable-prefix-caching")
+	}
+	if req.Task == TaskGenerate && !req.EnableMultimodal {
+		args = append(args, "--language-model-only")
 	}
 	if req.KVCacheDtype != "" {
 		args = append(args, "--kv-cache-dtype", req.KVCacheDtype)

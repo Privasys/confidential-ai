@@ -90,6 +90,30 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
       "https://github.com/vllm-project/vllm/releases/download/v0.27.1/vllm-0.27.1+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
 
+# Disable vLLM 0.27's unconditional Qwen Triton warmup
+# (vllm/model_executor/warmup/qwen_triton_warmup.py). On the H100 TDX
+# deployment its synthetic GDN shapes hang a kernel launch: two 45-min
+# load attempts died inside it with zero progress (m4/cai-next,
+# 2026-08-25) while the engine's own profiling forward pass — which runs
+# the same GDN layers on real shapes — completed in ~13 s. Neutering the
+# entry point restores the 0.22.1 behavior (kernels JIT lazily on first
+# request, cached under TRITON_CACHE_DIR on /data). Appending an override
+# rebinds the module attribute before any caller imports it. Revisit when
+# upstream makes the warmup optional or fixes the hang.
+RUN python3 - <<'PYEOF'
+import pathlib
+p = pathlib.Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/warmup/qwen_triton_warmup.py")
+src = p.read_text()
+assert "def qwen_triton_warmup(" in src, "warmup entry not found - vLLM layout changed"
+src += (
+    "\n\n# privasys: warmup disabled - synthetic GDN shapes hang on H100 CC (2026-08-25)\n"
+    "def qwen_triton_warmup(runner, model_config):  # noqa: F811\n"
+    "    logger.info(\"Qwen Triton warmup disabled by privasys build; kernels JIT lazily.\")\n"
+)
+p.write_text(src)
+print("qwen_triton_warmup neutered")
+PYEOF
+
 # Bake the official Gemma 4 chat template into the image so the
 # manager can reference it by short name (--chat-template gemma4
 # resolves here). Pinned to the exact vLLM release tag for

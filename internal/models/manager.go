@@ -169,6 +169,14 @@ type LoadRequest struct {
 	// parser auto-recipes.
 	HFOverrides string `json:"hf_overrides,omitempty"`
 
+	// EnforceEager disables CUDA graph capture (`--enforce-eager`).
+	// Diagnostic/emergency knob: on vLLM 0.27.1 + H100 TDX (CC mode),
+	// engine bring-up hangs at the capture phase for EVERY model incl.
+	// plain text ones (m4/cai-next, 2026-08-25) — eager isolates capture
+	// from the kernels. ~30x throughput cost when left on; never the
+	// production default.
+	EnforceEager bool `json:"enforce_eager,omitempty"`
+
 	// EnableMultimodal keeps vLLM's multimodal input processing enabled
 	// for VL-architecture checkpoints. Default FALSE → we pass
 	// `--language-model-only` (vLLM >= 0.27), which zeroes every modality
@@ -934,6 +942,9 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 	if req.Task == TaskGenerate && !req.EnableMultimodal {
 		args = append(args, "--language-model-only")
+	}
+	if req.EnforceEager {
+		args = append(args, "--enforce-eager")
 	}
 	if req.KVCacheDtype != "" {
 		args = append(args, "--kv-cache-dtype", req.KVCacheDtype)

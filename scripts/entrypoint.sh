@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
+# Raise the fd limit if the container runtime allows it. vLLM 0.27 warns
+# at startup that it cannot raise the 1024 hard limit itself ("current
+# limit exceeds maximum limit") and that fd exhaustion causes errors; the
+# engine also hangs at CUDA-graph capture on this deployment (m4,
+# 2026-08-25) with the fd ceiling one of the suspects. Best-effort: as
+# container root with CAP_SYS_RESOURCE this lifts both limits for every
+# child; if the runtime denies it we log and continue.
+if ulimit -Hn 65536 2>/dev/null && ulimit -n 65536 2>/dev/null; then
+    echo "[entrypoint] fd limit raised to $(ulimit -n)"
+else
+    echo "[entrypoint] fd limit raise DENIED (hard=$(ulimit -Hn)); continuing"
+fi
+
 # --- Confidential-AI Entrypoint ------------------------------------------
 #
 # Two modes:

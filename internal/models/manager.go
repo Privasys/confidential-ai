@@ -646,6 +646,13 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		// CUDA >= 10.2; vLLM picks this up via PyTorch.
 		"CUBLAS_WORKSPACE_CONFIG=:4096:8",
 		"PYTHONHASHSEED=0",
+		// Persist Triton's JIT kernel cache on the encrypted volume.
+		// Default is ~/.triton in the container OVERLAY, wiped on every
+		// redeploy — and vLLM 0.27's Qwen Triton warmup front-loads ~20
+		// minutes of GDN-kernel autotune compiles into startup. On /data
+		// that cost is paid once per volume; vLLM's own compile cache
+		// (VLLM_CACHE_ROOT) already lands on /data/.cache/vllm.
+		"TRITON_CACHE_DIR=/data/.cache/triton",
 		// VLLM_USE_V1 intentionally NOT set: defaults to V1 in
 		// vLLM >= 0.19, which is what we want for throughput.
 		//
@@ -1073,7 +1080,14 @@ func (m *Manager) waitForReady(ctx context.Context, waitCh chan error, gen uint6
 	// twice on m5-dev-ai, 2026-07-15) and burns a whole cycle per miss.
 	iterations := 180
 	if m.task == TaskGenerate {
-		iterations = 300
+		// 45 min: vLLM 0.27's runner-owned Qwen Triton warmup
+		// (qwen_triton_warmup.py, unconditional for GDN models) autotunes
+		// the three FLA kernels at startup — ~20 min of CPU-bound Triton
+		// compiles on a COLD cache. The previous 25-min cap killed a load
+		// that was still legitimately compiling (cai-next on m4,
+		// 2026-08-25). TRITON_CACHE_DIR now persists on /data, so the
+		// cost is once per volume; the wide cap covers the first load.
+		iterations = 540
 	}
 	for i := 0; i < iterations; i++ {
 		select {

@@ -84,11 +84,23 @@ func TestBuildVLLMArgs_MemoryTuningFlags(t *testing.T) {
 	}
 }
 
+func TestBuildVLLMArgs_CudagraphMode(t *testing.T) {
+	req := LoadRequest{
+		Model: "m", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90,
+		CudagraphMode: "PIECEWISE",
+	}
+	args := buildVLLMArgs(req, "/models/m", 8000)
+
+	if got := flagValue(args, "--compilation-config"); got != `{"cudagraph_mode": "PIECEWISE"}` {
+		t.Errorf("--compilation-config: got %q", got)
+	}
+}
+
 func TestBuildVLLMArgs_OmitsTuningFlagsByDefault(t *testing.T) {
 	req := LoadRequest{Model: "m", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
 	args := buildVLLMArgs(req, "/models/m", 8000)
 
-	for _, flag := range []string{"--kv-cache-dtype", "--mamba-ssm-cache-dtype", "--max-cudagraph-capture-size", "--max-num-seqs"} {
+	for _, flag := range []string{"--kv-cache-dtype", "--mamba-ssm-cache-dtype", "--max-cudagraph-capture-size", "--max-num-seqs", "--compilation-config"} {
 		if slices.Contains(args, flag) {
 			t.Errorf("unset field must not emit %s: %v", flag, args)
 		}

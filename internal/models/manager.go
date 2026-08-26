@@ -177,6 +177,16 @@ type LoadRequest struct {
 	// production default.
 	EnforceEager bool `json:"enforce_eager,omitempty"`
 
+	// CudagraphMode overrides the compilation-config cudagraph_mode
+	// (NONE | PIECEWISE | FULL | FULL_DECODE_ONLY | FULL_AND_PIECEWISE).
+	// Added for the 0.27.1 H100 CC-mode capture hang (m4, 2026-08-25):
+	// the default mode hangs at the capture phase for every model while
+	// eager works, and this knob isolates which capture flavor is at
+	// fault — if PIECEWISE captures, it is also the production fallback
+	// (keeps piecewise decode graphs, avoids full-graph capture). Empty
+	// means vLLM default. Moot when EnforceEager is set.
+	CudagraphMode string `json:"cudagraph_mode,omitempty"`
+
 	// EnableMultimodal keeps vLLM's multimodal input processing enabled
 	// for VL-architecture checkpoints. Default FALSE → we pass
 	// `--language-model-only` (vLLM >= 0.27), which zeroes every modality
@@ -954,6 +964,10 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 	if req.MaxCudagraphCaptureSize > 0 {
 		args = append(args, "--max-cudagraph-capture-size", fmt.Sprintf("%d", req.MaxCudagraphCaptureSize))
+	}
+	if req.CudagraphMode != "" {
+		args = append(args, "--compilation-config",
+			fmt.Sprintf(`{"cudagraph_mode": %q}`, req.CudagraphMode))
 	}
 	if req.Quantization != "" && req.Quantization != "none" {
 		args = append(args, "--quantization", req.Quantization)

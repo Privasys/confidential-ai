@@ -64,6 +64,11 @@ export PYTHONHASHSEED=0
 # they were written. Fresh volumes and storage-less apps are no-ops.
 CACHE_ROOT=/data/.cache
 CACHE_MARKER="$CACHE_ROOT/.image-digest"
+# The platform launcher injects PRIVASYS_IMAGE_DIGEST (launcher.go); the
+# bare IMAGE_DIGEST name only exists for manual/dev runs. Before this
+# mapping the wipe below silently skipped (and --image-digest was always
+# empty) because the unprefixed name is never set in production.
+IMAGE_DIGEST="${IMAGE_DIGEST:-${PRIVASYS_IMAGE_DIGEST:-}}"
 if [[ -n "${IMAGE_DIGEST:-}" && -d /data ]]; then
   if [[ ! -f "$CACHE_MARKER" || "$(cat "$CACHE_MARKER" 2>/dev/null)" != "$IMAGE_DIGEST" ]]; then
     echo "[entrypoint] image digest changed (or no marker): wiping JIT/compile caches under $CACHE_ROOT"

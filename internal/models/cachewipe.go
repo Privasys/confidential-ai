@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 // Dirty-load JIT/compile cache invalidation.
@@ -35,18 +36,50 @@ func (m *Manager) dirtyLoadSentinelPath() string {
 	return fmt.Sprintf("%s/.load-in-progress-%s", cacheRoot, m.task)
 }
 
+// liveVLLM tracks which tasks currently have a vLLM process alive (from
+// spawn to reap). The cache dirs are shared, so a dirty-sentinel wipe must
+// never run while a sibling's process may be JIT-writing into them — on
+// cai-next (2026-08-26) rerank's wipe fired mid-fleet-load and destroyed
+// generate's 35 minutes of in-progress compile artifacts. Registered in
+// runVLLM after cmd.Start, deregistered when the process is reaped.
+var liveVLLM sync.Map
+
+func registerLiveVLLM(task Task)   { liveVLLM.Store(task, true) }
+func deregisterLiveVLLM(task Task) { liveVLLM.Delete(task) }
+
+// siblingAlive reports whether any OTHER task's vLLM process is alive.
+func (m *Manager) siblingAlive() bool {
+	found := false
+	liveVLLM.Range(func(k, _ any) bool {
+		if k.(Task) != m.task {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // wipeCachesIfDirtyLoad wipes the JIT caches when this task's previous
 // load never reached ready, then (re)arms the sentinel for the load that
-// is about to start. Best-effort: on a storage-less app the paths live in
-// the container overlay and every step degrades to a no-op.
+// is about to start. The wipe is skipped (sentinel left in place, so the
+// attempt recurs on the next load) while a sibling vLLM process is alive.
+// Best-effort: on a storage-less app the paths live in the container
+// overlay and every step degrades to a no-op.
 func (m *Manager) wipeCachesIfDirtyLoad() {
 	sentinel := m.dirtyLoadSentinelPath()
 	if _, err := os.Stat(sentinel); err == nil {
-		fmt.Fprintf(os.Stderr,
-			"{\"level\":\"warn\",\"msg\":\"previous load never reached ready; wiping JIT caches\",\"task\":%q}\n",
-			m.task)
-		for _, d := range jitCacheDirs {
-			os.RemoveAll(cacheRoot + "/" + d)
+		if m.siblingAlive() {
+			fmt.Fprintf(os.Stderr,
+				"{\"level\":\"warn\",\"msg\":\"dirty-load sentinel present but sibling vLLM alive; skipping cache wipe\",\"task\":%q}\n",
+				m.task)
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"{\"level\":\"warn\",\"msg\":\"previous load never reached ready; wiping JIT caches\",\"task\":%q}\n",
+				m.task)
+			for _, d := range jitCacheDirs {
+				os.RemoveAll(cacheRoot + "/" + d)
+			}
 		}
 	}
 	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {

@@ -748,6 +748,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		m.setFailed(gen, "failed to start vLLM: "+err.Error())
 		return
 	}
+	registerLiveVLLM(m.task)
 
 	// Parse both streams for progress/tail in background. parseProgress
 	// appends to the shared ring under m.mu, so two scanners are safe;
@@ -766,6 +767,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	procDone := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
+		deregisterLiveVLLM(m.task)
 		waitCh <- err
 		close(procDone)
 	}()

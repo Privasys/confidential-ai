@@ -655,6 +655,18 @@ func (m *Manager) doLoad(req LoadRequest, gen uint64) {
 // doLoad for all tasks; ctx is doLoad's cancellable load context, gen
 // the load generation guarding every state write.
 func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelPath string, gen uint64) {
+	// Dirty-load cache guard. The JIT/compile caches below (Triton,
+	// VLLM_CACHE_ROOT, FlashInfer via HOME) persist on /data, and a load
+	// killed mid-JIT-write leaves truncated entries that poison the next
+	// bring-up — on m4 (2026-08-26) a stale cache hung CUDA-graph capture
+	// indefinitely on every model while the identical engine on a
+	// cache-less app captured fine. A sentinel marks a load in flight;
+	// finding one already present means the previous load never reached
+	// ready (kill, OOM, crash), so the caches are suspect and wiped. The
+	// sentinel is cleared on readiness. Entrypoint.sh separately wipes on
+	// image-digest change (cross-version invalidation).
+	m.wipeCachesIfDirtyLoad()
+
 	args := buildVLLMArgs(req, modelPath, m.vllmPort)
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
@@ -812,6 +824,9 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 
 	// Persist the successful load so a container restart auto-recovers.
 	m.persistRequest(req)
+
+	// The load reached ready: the JIT/compile caches are consistent.
+	m.clearDirtyLoadSentinel()
 
 	// Wait for process exit (blocks until vLLM dies or is killed).
 	if err := <-waitCh; err != nil {

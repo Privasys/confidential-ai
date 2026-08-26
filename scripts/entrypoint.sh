@@ -52,6 +52,31 @@ fi
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 
+# --- Version-scoped JIT/compile cache invalidation ------------------------
+#
+# The Triton and torch.compile caches persist on /data across deploys for
+# cold-start speed, but they are IMAGE-VERSION ARTIFACTS: entries written by
+# a different vLLM/torch build (or truncated by a killed load mid-JIT-write)
+# poison later engine bring-up — on m4 (2026-08-26) a stale cache from the
+# v0.6.1/v0.6.2 rounds hung CUDA-graph capture indefinitely on every model
+# while the identical engine on a cache-less app captured fine. Scope the
+# caches to the image: wipe them whenever the image digest changed since
+# they were written. Fresh volumes and storage-less apps are no-ops.
+CACHE_ROOT=/data/.cache
+CACHE_MARKER="$CACHE_ROOT/.image-digest"
+if [[ -n "${IMAGE_DIGEST:-}" && -d /data ]]; then
+  if [[ ! -f "$CACHE_MARKER" || "$(cat "$CACHE_MARKER" 2>/dev/null)" != "$IMAGE_DIGEST" ]]; then
+    echo "[entrypoint] image digest changed (or no marker): wiping JIT/compile caches under $CACHE_ROOT"
+    rm -rf "$CACHE_ROOT/triton" "$CACHE_ROOT/vllm" "$CACHE_ROOT/torch" "$CACHE_ROOT/flashinfer" 2>/dev/null || true
+    mkdir -p "$CACHE_ROOT"
+    printf '%s' "$IMAGE_DIGEST" > "$CACHE_MARKER"
+  else
+    echo "[entrypoint] JIT/compile caches valid for this image (digest match)"
+  fi
+elif [[ -d /data ]]; then
+  echo "[entrypoint] IMAGE_DIGEST unset; skipping cache invalidation check"
+fi
+
 # --- Dynamic mode: just start the Go proxy --------------------------------
 if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
   echo "[confidential-ai] Dynamic model loading mode (models_dir=$MODELS_DIR)"

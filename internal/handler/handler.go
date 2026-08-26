@@ -1349,6 +1349,17 @@ func (h *Handler) modelsLoad(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// Fleet-aware GPU budget. The per-task defaults (generate 0.90,
+		// embed/rerank 0.08 each) sum to 1.06 — vLLM 0.22 tolerated the
+		// overcommit, but 0.27 enforces the budget strictly at engine init
+		// (the last instance found 1.84 GiB free against a 6.3 GiB request
+		// and refused to start; m4, 2026-08-26). When the caller asks for
+		// pooling siblings without an explicit generate utilisation, cap
+		// generate at 0.80 so 0.80+0.08+0.08=0.96 leaves headroom for the
+		// three CUDA contexts. Solo generate keeps the 0.90 default.
+		if p.GPUMemoryUtilization == 0 && (p.EmbeddingModel != "" || p.RerankModel != "") {
+			p.GPUMemoryUtilization = 0.80
+		}
 		reqs := map[models.Task]models.LoadRequest{models.TaskGenerate: p.LoadRequest}
 		if p.EmbeddingModel != "" {
 			reqs[models.TaskEmbed] = models.LoadRequest{Task: models.TaskEmbed, Model: p.EmbeddingModel}

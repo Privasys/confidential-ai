@@ -215,6 +215,12 @@ func TestBuildVLLMArgs_LanguageModelOnly(t *testing.T) {
 		t.Fatalf("enable_multimodal must drop the flag: %v", args)
 	}
 	embed := LoadRequest{Task: TaskEmbed, Model: "e", Dtype: "auto", MaxModelLen: 4096, GPUMemoryUtilization: 0.05}
+	if args := buildVLLMArgs(req, "/models/m", 8000); !slices.Contains(args, "--enable-prompt-tokens-details") {
+		t.Errorf("generate must enable prompt tokens details (cached_tokens disclosure): %v", args)
+	}
+	if args := buildVLLMArgs(embed, "/models/e", 8001); slices.Contains(args, "--enable-prompt-tokens-details") {
+		t.Errorf("embed must not carry --enable-prompt-tokens-details: %v", args)
+	}
 	if args := buildVLLMArgs(embed, "/models/e", 8001); slices.Contains(args, "--language-model-only") {
 		t.Fatalf("non-generate tasks must not carry the flag: %v", args)
 	}

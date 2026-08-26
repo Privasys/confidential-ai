@@ -968,6 +968,14 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	if req.Task == TaskGenerate && !req.EnableMultimodal {
 		args = append(args, "--language-model-only")
 	}
+	if req.Task == TaskGenerate {
+		// Populate usage.prompt_tokens_details.cached_tokens in completions.
+		// vLLM only reports prefix-cache hits when this flag is set (verified
+		// absent-by-default on 0.27.1, m4 2026-08-26), and the replay
+		// contract requires every response to disclose its hits via
+		// reproducibility.cached_tokens.
+		args = append(args, "--enable-prompt-tokens-details")
+	}
 	if req.EnforceEager {
 		args = append(args, "--enforce-eager")
 	}

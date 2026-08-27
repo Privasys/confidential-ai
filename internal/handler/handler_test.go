@@ -536,3 +536,57 @@ func TestStreamingChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T)
 		t.Fatalf("missing [DONE] terminator:\n%s", body)
 	}
 }
+
+// A caller that supplies CLIENT-side tools normally gets the strict
+// pass-through (generic OpenAI clients reject the trailing repro frame) —
+// but the X-Privasys-Reproducibility opt-in declares the caller parses the
+// extension, so it must win over the tools heuristic. Found live 2026-08-27:
+// the attested harness (client-side tools + opt-in) silently lost its
+// repro block.
+func TestChatCompletionsClientToolsReproOptIn(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}` + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer vllm.Close()
+
+	h := New(&config.Config{
+		ModelName:    "m",
+		VLLMUpstream: vllm.URL,
+		MCPServers:   "rag=http://127.0.0.1:1/unused", // dispatcher present, never dispatched
+		TeeType:      "tdx",
+	}, nil)
+	h.ready.Store(1)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"local_bash","parameters":{"type":"object"}}}]}`
+
+	run := func(optIn bool) string {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-App-Auth", authInference(t, h))
+		if optIn {
+			req.Header.Set("X-Privasys-Reproducibility", "1")
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("optIn=%v: status %d body %s", optIn, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	if got := run(true); !strings.Contains(got, `"reproducibility"`) {
+		t.Errorf("opt-in + client tools must carry the repro frame, got: %s", got)
+	}
+	if got := run(false); strings.Contains(got, `"reproducibility"`) {
+		t.Errorf("no opt-in must stay a strict pass-through, got: %s", got)
+	}
+}

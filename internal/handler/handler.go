@@ -526,9 +526,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Client supplied its own tools (e.g. Zed). It speaks plain
-		// OpenAI streaming and cannot parse our `reproducibility` SSE
-		// event — its stream parser rejects any non-chat-chunk `data:`
-		// frame. Use the strict pass-through path.
+		// OpenAI streaming and usually cannot parse our `reproducibility`
+		// SSE event — its stream parser rejects any non-chat-chunk
+		// `data:` frame. Use the strict pass-through path — UNLESS the
+		// caller explicitly opted in: the X-Privasys-Reproducibility
+		// header is precisely the declaration that it parses the
+		// extension. The attested harness is that caller — it dispatches
+		// its own tools client-side AND records the repro block on its
+		// egress leg (found 2026-08-27: the passthrough silently dropped
+		// the block for it despite the opt-in).
+		if wantsReproducibility(r) {
+			h.proxyWithReproducibility(w, r, "/v1/chat/completions")
+			return
+		}
 		h.proxyPassthrough(w, r, "/v1/chat/completions")
 		return
 	}

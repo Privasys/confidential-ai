@@ -24,7 +24,7 @@ env:
   # go.mod replaces enclave-os-mini/clients/go with the sibling checkout
   # ../ra-tls-clients/go (same pattern as the CLI repo). Keep the ref in
   # sync with the ARG default in Dockerfile/Dockerfile.prod.
-  RA_TLS_CLIENTS_REF: 312969f1949d4bdf8048a853f1ab9cfc06622426
+  RA_TLS_CLIENTS_REF: c6c63216dc5a0915569826e3ba2c1efdf44de6b0
 
 jobs:
   test:

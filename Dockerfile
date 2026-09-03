@@ -11,7 +11,7 @@ FROM golang:1.26-bookworm AS builder
 # The MCP RA-TLS v2 transport builds on upstream Go; it needs the sibling
 # ra-tls-clients module that go.mod replaces to ../ra-tls-clients/go.
 # Keep the pin in sync with .github/workflows/build.yml (an RA-TLS v2 commit).
-ARG RA_TLS_CLIENTS_REF=64438d2593f26e4250bbb75e25240a5422876136
+ARG RA_TLS_CLIENTS_REF=c6c63216dc5a0915569826e3ba2c1efdf44de6b0
 RUN git clone https://github.com/Privasys/ra-tls-clients /ra-tls-clients  && git -C /ra-tls-clients checkout "${RA_TLS_CLIENTS_REF}"
 ENV GOTOOLCHAIN=local
 

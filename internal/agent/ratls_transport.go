@@ -34,9 +34,6 @@ import (
 // tool itself. Non-HTTPS URLs (local dev against plain-HTTP MCP servers)
 // fall through to the standard transport.
 //
-// Building WITHOUT the Privasys Go fork (-tags ratls) leaves the challenge
-// unsupported: Connect fails at runtime and the catalogue logs the error —
-// production images are built with the fork (see Dockerfile).
 type RATLSTransport struct {
 	// Timeout bounds connect + attestation verification per request.
 	Timeout time.Duration

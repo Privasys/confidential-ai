@@ -51,7 +51,7 @@ type Metadata struct {
 	CachedTokens *int64 `json:"cached_tokens,omitempty"`
 
 	// DependencySetFold is the identity fold of the attested dependency set
-	// (OID 1.3.6.1.4.1.65230.6.1) this enclave was enforcing when the
+	// (OID 1.3.6.1.4.1.65230.7.1) this enclave was enforcing when the
 	// response was produced — the same set a verifier can read off the
 	// serving certificate. It commits to WHICH tool enclaves the assistant
 	// could reach, and because the fold folds in each dependency's own

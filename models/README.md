@@ -96,7 +96,7 @@ Both endpoints sit behind the same mandatory inference auth and freeze
 gate as chat, and meter input tokens under their own ledger resources
 (`ai_input_tokens_qwen3_{embedding,reranker}_06b`, 0.1 cr/token). The
 attested serving manifest for dependants (Privasys Drive pins the fleet
-via OID 65230.6.1) is `GET /.well-known/served-models`: build identity +
+via OID 65230.7.1) is `GET /.well-known/served-models`: build identity +
 every served model with its dm-verity digest. An embedding-model change
 is a Drive reindex event — version deliberately.
 

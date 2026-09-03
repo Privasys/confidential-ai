@@ -1441,7 +1441,7 @@ func (h *Handler) modelsUnload(w http.ResponseWriter, r *http.Request) {
 // method: the container declares its own attestation OIDs, and Caddy's RA-TLS
 // module pulls them at certificate issuance time.
 //
-// Serves OID 1.3.6.1.4.1.65230.3.5.5 (MODEL_DIGEST) when a model digest is
+// Serves OID 1.3.6.1.4.1.65230.5.4.5 (MODEL_DIGEST) when a model digest is
 // available. The digest is sourced, in order of preference:
 //
 //  1. The dm-verity root hash of the mounted model disk
@@ -1477,7 +1477,7 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 		digestBytes, err := hex.DecodeString(digest)
 		if err == nil && len(digestBytes) > 0 {
 			exts = append(exts, entry{
-				OID:   "1.3.6.1.4.1.65230.3.5.5",
+				OID:   "1.3.6.1.4.1.65230.5.4.5",
 				Value: base64.StdEncoding.EncodeToString(digestBytes),
 			})
 			// Legacy slot — see the function doc; remove once no live
@@ -1488,7 +1488,7 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 			})
 		}
 	}
-	// OID 1.3.6.1.4.1.65230.3.5.7 (TOOLS_DIGEST): sha256 over the
+	// OID 1.3.6.1.4.1.65230.5.4.7 (TOOLS_DIGEST): sha256 over the
 	// canonical, sorted JSON of the configured MCP servers (name,
 	// base_url, transport, auth_mode, audience, confirm). A verifier
 	// can recompute this from the management-service ai_tools rows
@@ -1502,7 +1502,7 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 		if td := h.agentCatalog.ServersDigest(); td != "" {
 			if tdBytes, err := hex.DecodeString(td); err == nil && len(tdBytes) > 0 {
 				exts = append(exts, entry{
-					OID:   "1.3.6.1.4.1.65230.3.5.7",
+					OID:   "1.3.6.1.4.1.65230.5.4.7",
 					Value: base64.StdEncoding.EncodeToString(tdBytes),
 				})
 			}
@@ -1519,7 +1519,7 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 // serving manifest for dependant enclaves (ai-plan §7.5). Drive fetches
 // this over RA-TLS (the transport already proves the fleet's measurement
 // and image), pins the build + model set in its manager-enforced
-// AttestedDependencySet (OID 1.3.6.1.4.1.65230.6.1), discloses it in its
+// AttestedDependencySet (OID 1.3.6.1.4.1.65230.7.1), discloses it in its
 // own attestation, and fails closed on mismatch. Each model entry
 // carries the dm-verity root hash of the disk it was loaded from — an
 // embedding-model change is a Drive reindex event, so the pin must be

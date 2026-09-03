@@ -16,7 +16,7 @@ import (
 
 // DepSet is this workload's attested dependency set as the RUNTIME declares
 // it — the same bytes the enclave manager stamps into our serving
-// certificate at OID 1.3.6.1.4.1.65230.6.1.
+// certificate at OID 1.3.6.1.4.1.65230.7.1.
 //
 // Sourcing the pins from here, rather than from the tool catalogue, is what
 // makes "declared == enforced" true by construction: the platform decides

@@ -133,10 +133,11 @@ type LoadRequest struct {
 	MaxNumBatchedTokens int `json:"max_num_batched_tokens,omitempty"`
 
 	// EnablePrefixCaching turns on vLLM automatic prefix caching
-	// (`--enable-prefix-caching`). Default false — matching vLLM's own
-	// default for the hybrid (Mamba) models we serve, where support is
-	// still experimental (mamba_cache_mode=align; hits only on fully
-	// completed ~528-token aligned blocks). Reuse is scoped per caller
+	// (`--enable-prefix-caching`). This field defaults false, but since
+	// vLLM 0.28.0 prefix caching is ON BY DEFAULT for the hybrid (Mamba)
+	// models we serve (#50991), so leaving it false no longer means
+	// "off" at the engine — pass an explicit value when a deployment
+	// needs caching disabled. Reuse is scoped per caller
 	// by the proxy's cache_salt injection (see handler/cache_salt.go),
 	// and every response disclosed its hits via
 	// reproducibility.cached_tokens, so enabling this never silently

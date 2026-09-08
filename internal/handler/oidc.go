@@ -84,6 +84,16 @@ const (
 	peerAppIDHeader    = "X-Privasys-Peer-App-Id"
 )
 
+// onBehalfOfHeader names the end user an attested peer app is acting for.
+// Honoured ONLY behind a manager-verified peer verdict: an allowed caller
+// (the harness, Drive) binds its acting user in its own measured code and
+// the ingress verifier has already proven which code that is, so the value
+// is as trustworthy as the peer identity itself. The user, not the app, is
+// then the metered caller ("the user pays", decision 2026-09-08). Without
+// a peer verdict the header is ignored, so nothing outside an attested
+// peer can name a payer.
+const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
+
 // resolveCaller extracts the end-user credential from X-App-Auth (the proxied
 // path, forwarded by the management-service) or the Authorization bearer (a
 // direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
@@ -110,11 +120,16 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		// caller's attested client certificate (quote, measurements, allowed-
 		// callers policy, channel binder) and asserted its identity in these
 		// headers — which it strips from every non-verified path, so they
-		// cannot be spoofed from outside. The caller is the attested APP, not
-		// a wallet user; the "app:" prefix keeps the subject space disjoint
-		// from pairwise user subs for metering and billing.
+		// cannot be spoofed from outside. When the peer names the user it acts
+		// for (onBehalfOfHeader), that user is the caller and pays; otherwise
+		// the caller is the attested APP itself, and the "app:" prefix keeps
+		// the subject space disjoint from pairwise user subs for metering
+		// and billing.
 		if r.Header.Get(peerVerifiedHeader) == "true" {
 			if id := strings.TrimSpace(r.Header.Get(peerAppIDHeader)); id != "" {
+				if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
+					return sub, nil
+				}
 				return "app:" + id, nil
 			}
 		}

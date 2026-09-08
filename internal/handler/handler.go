@@ -397,7 +397,32 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tools", h.toolServers)
 	mux.HandleFunc("GET /v1/tools/{server}/settings", h.toolSettings)
 	mux.HandleFunc("PUT /v1/tools/{server}/settings", h.toolSettings)
-	mux.HandleFunc("POST /configure", h.configure)
+	// Billing configure is a privileged surface: it names where usage
+	// reports go and the bearer they carry, so an open endpoint lets anyone
+	// reachable over the RA-TLS-direct leg disable metering or steal the
+	// usage-report token (found open on prod 2026-09-08). The platform
+	// delivers it with its manager service token; the owner may too.
+	mux.HandleFunc("POST /configure", h.requireConfigureAuth(h.configure))
+}
+
+// platformManagerRole is the role the management-service's own service
+// account carries (the enclave manager gates its mutating API on it). It
+// authorises the platform-driven configure surfaces of this app.
+func (h *Handler) platformManagerRole() string {
+	aud := h.cfg.OIDCAudience
+	if aud == "" {
+		aud = "privasys-platform"
+	}
+	return aud + ":manager"
+}
+
+// requireConfigureAuth gates the billing configure endpoint: the app's
+// owner/admin config roles (like load/unload) OR the platform manager role
+// the management-service delivers the config with on every deploy.
+func (h *Handler) requireConfigureAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.requireRoleAuth(next, func() []string {
+		return append(h.loadRoles(), h.platformManagerRole())
+	})
 }
 
 // requireLoadAuth gates model load/unload. Authorisation order:
@@ -437,6 +462,13 @@ func (h *Handler) loadRoles() []string {
 }
 
 func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.requireRoleAuth(next, h.loadRoles)
+}
+
+// requireRoleAuth is the shared gate behind requireLoadAuth and
+// requireConfigureAuth: a verified platform bearer carrying one of roles(),
+// else the legacy static token, else (nothing configured) dev mode.
+func (h *Handler) requireRoleAuth(next http.HandlerFunc, roles func() []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.oidcVerifier == nil && h.cfg.LoadToken == "" {
 			next(w, r) // dev mode: no auth configured
@@ -456,7 +488,7 @@ func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
 				// owner-gated like every other app (the configure-authz
 				// standard): the caller's platform bearer carries
 				// <audience>:app:<hex>:owner|admin for THIS app.
-				for _, role := range h.loadRoles() {
+				for _, role := range roles() {
 					if claims.HasRole(role) {
 						next(w, r)
 						return

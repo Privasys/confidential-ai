@@ -364,3 +364,95 @@ func TestRequireLoadAuth_OIDCConfiguredLegacyFallback(t *testing.T) {
 		t.Fatalf("legacy fallback under OIDC rejected: called=%v code=%d", called, rec.Code)
 	}
 }
+
+// An attested peer that names the user it acts for is metered as that user
+// ("the user pays"); without a peer verdict the header is inert.
+func TestResolveCaller_AttestedPeerOnBehalfOf(t *testing.T) {
+	issuer, _ := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
+	r.Header.Set(onBehalfOfHeader, "  user-pairwise-sub  ")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "user-pairwise-sub" {
+		t.Fatalf("verified peer on behalf of user: sub=%q err=%v", sub, err)
+	}
+
+	// Blank on-behalf-of falls back to the app identity.
+	r.Header.Set(onBehalfOfHeader, "   ")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "app:590ebdc31b63401fbbb822d5f3886c5e" {
+		t.Fatalf("blank on-behalf-of must fall back to the app: sub=%q err=%v", sub, err)
+	}
+
+	// No peer verdict: the header names nobody.
+	for _, hdrs := range []map[string]string{
+		{onBehalfOfHeader: "user-pairwise-sub"},
+		{peerVerifiedHeader: "false", peerAppIDHeader: "590ebdc31b63401fbbb822d5f3886c5e", onBehalfOfHeader: "user-pairwise-sub"},
+		{peerVerifiedHeader: "true", onBehalfOfHeader: "user-pairwise-sub"}, // verdict without app id
+	} {
+		r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		for k, v := range hdrs {
+			r.Header.Set(k, v)
+		}
+		if sub, err := h.resolveCaller(r); err != nil || sub != "" {
+			t.Fatalf("unverified on-behalf-of %v must stay anonymous: sub=%q err=%v", hdrs, sub, err)
+		}
+	}
+
+	// The relay-asserted subject (a sealed session) still wins over a peer
+	// verdict: it is checked first and never combined with app headers.
+	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(relaySubHeader, "sealed-user")
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
+	r.Header.Set(onBehalfOfHeader, "user-pairwise-sub")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "sealed-user" {
+		t.Fatalf("relay subject precedence: sub=%q err=%v", sub, err)
+	}
+}
+
+// POST /configure (billing) is privileged: the app owner/admin roles pass
+// as for load/unload, and so does the platform manager role the
+// management-service delivers the config with; anything else is refused.
+func TestRequireConfigureAuth_OwnerOrPlatformManager(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	const appID = "3a545cb7-740e-4d31-839b-7341359631a2"
+	const ownerRole = "privasys-platform:app:3a545cb7740e4d31839b7341359631a2:owner"
+	h := &Handler{
+		cfg:          &config.Config{OIDCIssuer: issuer, OIDCAudience: "privasys-platform", AppID: appID},
+		oidcVerifier: NewOIDCVerifier(issuer, ""),
+	}
+	called := false
+	gate := h.requireConfigureAuth(func(http.ResponseWriter, *http.Request) { called = true })
+	exp := float64(time.Now().Add(time.Hour).Unix())
+
+	for _, tc := range []struct {
+		name  string
+		roles []string
+		code  int
+		pass  bool
+	}{
+		{"owner", []string{ownerRole}, http.StatusOK, true},
+		{"platform manager (mgmt service token)", []string{"privasys-platform:manager"}, http.StatusOK, true},
+		{"another app's owner", []string{"privasys-platform:app:00000000000000000000000000000000:owner"}, http.StatusForbidden, false},
+		{"no roles", nil, http.StatusForbidden, false},
+	} {
+		called = false
+		tok := mint(map[string]any{"iss": issuer, "sub": "u", "exp": exp, "roles": tc.roles})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/configure", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		gate(rec, req)
+		if called != tc.pass || rec.Code != tc.code {
+			t.Fatalf("%s: called=%v code=%d (want called=%v code=%d)", tc.name, called, rec.Code, tc.pass, tc.code)
+		}
+	}
+
+	// No token at all → 401 (the open endpoint found on prod 2026-09-08).
+	rec := httptest.NewRecorder()
+	gate(rec, httptest.NewRequest("POST", "/configure", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: code=%d", rec.Code)
+	}
+}

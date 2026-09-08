@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/privasys/confidential-ai/internal/billing"
 	"github.com/privasys/confidential-ai/internal/config"
 )
 
@@ -454,5 +455,46 @@ func TestRequireConfigureAuth_OwnerOrPlatformManager(t *testing.T) {
 	gate(rec, httptest.NewRequest("POST", "/configure", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token: code=%d", rec.Code)
+	}
+}
+
+// A verified caller with no billing account is refused with 402; a billable
+// one is served; when the check cannot be made and nothing is cached the
+// request fails open.
+func TestAuthorizeInference_RejectsCallerWithoutAccount(t *testing.T) {
+	issuer, mint := jwksTestIDP(t)
+	exp := float64(time.Now().Add(time.Hour).Unix())
+	mgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("sub") == "billable-user" {
+			w.Write([]byte(`{"billable":true}`))
+			return
+		}
+		w.Write([]byte(`{"billable":false}`))
+	}))
+	defer mgmt.Close()
+
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+	h.billing.Store(billing.New(billing.Config{AccountID: "acc", ReportURL: mgmt.URL + "/api/v1/enclave/ai-usage", ReportToken: "t"}))
+
+	call := func(sub string) (int, bool) {
+		tok := mint(map[string]any{"iss": issuer, "sub": sub, "exp": exp})
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		_, ok := h.authorizeInference(rec, r)
+		return rec.Code, ok
+	}
+	if code, ok := call("billable-user"); !ok {
+		t.Fatalf("billable caller refused: code=%d", code)
+	}
+	if code, ok := call("no-account-user"); ok || code != http.StatusPaymentRequired {
+		t.Fatalf("caller without account must get 402: ok=%v code=%d", ok, code)
+	}
+
+	// Outage, no cache: fail open (the reporter drops the line server-side).
+	mgmt.Close()
+	h.billing.Store(billing.New(billing.Config{AccountID: "acc", ReportURL: "http://127.0.0.1:1/api/v1/enclave/ai-usage"}))
+	if _, ok := call("someone-else"); !ok {
+		t.Fatal("unknown billability must fail open")
 	}
 }

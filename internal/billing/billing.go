@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -83,7 +84,11 @@ type Reporter struct {
 	cfg    Config
 	client *http.Client
 	queue  chan usage
-	frozen atomic.Bool
+
+	// Per-caller billability cache (see callercheck.go). Lazily built.
+	billableMu sync.Mutex
+	billable   map[string]billableEntry
+	frozen     atomic.Bool
 
 	// probeEvery is how often an idle reporter posts an empty batch to refresh
 	// the freeze state. Kept short enough that a newly-exhausted account is

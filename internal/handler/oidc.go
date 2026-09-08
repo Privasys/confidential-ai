@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -166,6 +167,21 @@ func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*h
 			writeError(w, http.StatusUnauthorized, "authentication required")
 		}
 		return r, false
+	}
+	// Authenticated is not enough: the caller must be someone the platform
+	// can debit. A subject with no billing account is refused here rather
+	// than served on the deployment owner's tab (Bertrand, 2026-09-08). The
+	// verdict is cached per caller; when the management-service cannot be
+	// asked and nothing is cached, inference fails open (as the freeze probe
+	// does) and the reporter drops the line server-side.
+	if rep := h.billing.Load(); rep != nil {
+		billable, err := rep.CallerBillable(r.Context(), sub)
+		if err != nil {
+			log.Printf("[billing] billability of caller %.8s… unknown, serving: %v", sub, err)
+		} else if !billable {
+			writeError(w, http.StatusPaymentRequired, "no billing account for this caller: open a Privasys platform account to use inference")
+			return r, false
+		}
 	}
 	r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, sub))
 	return r, true

@@ -47,10 +47,21 @@ func (c Config) Disabled() bool {
 // meters under its own ledger resource).
 type usage struct {
 	RequestID    string
-	Caller       string
+	Caller       Caller
 	Model        string
 	InputTokens  int64
 	OutputTokens int64
+}
+
+// Caller is who a request is attributed to: the verified end-user subject
+// (empty = the deployment-owner account) and, when the user reached us
+// through an app they allowed to spend for them (a spend token), that app
+// and the consent session, so the ledger records the spend under the app
+// and the user's per-app cap sees it.
+type Caller struct {
+	Sub string
+	App string // undashed hex app id (spend-token azp), or ""
+	SID string // consent session, or ""
 }
 
 // reportRequest is the JSON body posted to the AI-usage endpoint. It mirrors
@@ -64,6 +75,10 @@ type reportRequest struct {
 type reportRequestLn struct {
 	RequestID string `json:"request_id"`
 	CallerSub string `json:"caller_sub,omitempty"`
+	// PayerApp / SID: the spender app and consent session behind a
+	// spend-token caller (see Caller).
+	PayerApp string `json:"payer_app,omitempty"`
+	SID      string `json:"sid,omitempty"`
 	// Model overrides the batch-level model slug for this request
 	// (embed/rerank usage in a multi-model fleet). Empty means the
 	// batch-level model.
@@ -131,6 +146,12 @@ func (r *Reporter) Frozen() bool {
 // model). It never blocks: if the queue is full the sample is dropped
 // (best-effort metering). A nil Reporter and zero-token samples are ignored.
 func (r *Reporter) Record(requestID, caller, model string, inputTokens, outputTokens int64) {
+	r.RecordFor(requestID, Caller{Sub: caller}, model, inputTokens, outputTokens)
+}
+
+// RecordFor is Record with the full caller attribution (spender app and
+// consent session for a spend-token caller).
+func (r *Reporter) RecordFor(requestID string, caller Caller, model string, inputTokens, outputTokens int64) {
 	if r == nil || (inputTokens <= 0 && outputTokens <= 0) {
 		return
 	}
@@ -212,7 +233,9 @@ func (r *Reporter) send(ctx context.Context, batch []usage) {
 	for _, u := range batch {
 		body.Requests = append(body.Requests, reportRequestLn{
 			RequestID:    u.RequestID,
-			CallerSub:    u.Caller,
+			CallerSub:    u.Caller.Sub,
+			PayerApp:     u.Caller.App,
+			SID:          u.Caller.SID,
 			Model:        u.Model,
 			InputTokens:  u.InputTokens,
 			OutputTokens: u.OutputTokens,

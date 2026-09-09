@@ -498,3 +498,48 @@ func TestAuthorizeInference_RejectsCallerWithoutAccount(t *testing.T) {
 		t.Fatal("unknown billability must fail open")
 	}
 }
+
+// A spend token verified by the runtime names the PAYING user in the
+// X-Privasys-Peer-Payer* headers. It needs no peer verdict (a non-enclave
+// caller with a token pays the same way), wins over the relay subject and
+// the legacy on-behalf-of header, and carries the spender app + consent
+// session into the metering attribution.
+func TestResolveCaller_SpendTokenPayer(t *testing.T) {
+	issuer, _ := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(payerHeader, " user-pairwise-sub ")
+	r.Header.Set(payerAppHeader, "590EBDC31B63401FBBB822D5F3886C5E")
+	r.Header.Set(payerSIDHeader, "sid-1")
+	r.Header.Set(relaySubHeader, "sealed-user")
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
+	r.Header.Set(onBehalfOfHeader, "legacy-user")
+	sub, err := h.resolveCaller(r)
+	if err != nil || sub != "user-pairwise-sub" {
+		t.Fatalf("payer: sub=%q err=%v", sub, err)
+	}
+	rr := httptest.NewRecorder()
+	r2, ok := h.authorizeInference(rr, r)
+	if !ok {
+		t.Fatalf("authorizeInference refused: %d %s", rr.Code, rr.Body)
+	}
+	c := callerInfoFromContext(r2.Context())
+	if c.Sub != "user-pairwise-sub" || c.App != "590ebdc31b63401fbbb822d5f3886c5e" || c.SID != "sid-1" {
+		t.Fatalf("caller attribution: %+v", c)
+	}
+
+	// A bearer still wins over the payer header (explicit credential).
+	// And without the payer header, no spender app is attributed.
+	r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r3.Header.Set(relaySubHeader, "sealed-user")
+	rr3 := httptest.NewRecorder()
+	r3b, ok := h.authorizeInference(rr3, r3)
+	if !ok {
+		t.Fatal("relay caller refused")
+	}
+	if c := callerInfoFromContext(r3b.Context()); c.Sub != "sealed-user" || c.App != "" || c.SID != "" {
+		t.Fatalf("relay attribution: %+v", c)
+	}
+}

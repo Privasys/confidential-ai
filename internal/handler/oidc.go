@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/privasys/confidential-ai/internal/billing"
 )
 
 // OIDCVerifier validates platform OIDC bearer tokens offline via JWKS
@@ -95,6 +97,35 @@ const (
 // peer can name a payer.
 const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
 
+// Spend tokens (acting-subject plan v2). The enclave runtime verifies the
+// caller app's spend token and per-request proof on ingress and asserts
+// the PAYING USER here: the user who allowed that app to spend their
+// credits. The headers sit in the X-Privasys-Peer-* namespace the runtime
+// strips from every request it did not verify, so they are trustworthy on
+// any runtime, and they need no peer verdict: a non-enclave caller with a
+// spend token is as good a payer as an attested one. This is the final form
+// of "the user pays"; the on-behalf-of header above is the transitional one
+// and is removed once no caller sends it (see the source log lines).
+const (
+	payerHeader    = "X-Privasys-Peer-Payer"
+	payerAppHeader = "X-Privasys-Peer-Payer-App"
+	payerSIDHeader = "X-Privasys-Peer-Payer-Sid"
+)
+
+// payerCtxKey carries the spender app and consent session behind a
+// spend-token caller, for the metering path.
+type payerCtxKey struct{}
+
+// callerInfoFromContext returns the verified caller plus, for a spend-token
+// caller, the app that spends for them and the consent session.
+func callerInfoFromContext(ctx context.Context) billing.Caller {
+	c := billing.Caller{Sub: callerFromContext(ctx)}
+	if p, ok := ctx.Value(payerCtxKey{}).(billing.Caller); ok {
+		c.App, c.SID = p.App, p.SID
+	}
+	return c
+}
+
 // resolveCaller extracts the end-user credential from X-App-Auth (the proxied
 // path, forwarded by the management-service) or the Authorization bearer (a
 // direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
@@ -114,6 +145,10 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		}
 	}
 	if tok == "" {
+		// Spend token: the runtime named the paying user (see payerHeader).
+		if sub := strings.TrimSpace(r.Header.Get(payerHeader)); sub != "" {
+			return sub, nil
+		}
 		if sub := strings.TrimSpace(r.Header.Get(relaySubHeader)); sub != "" {
 			return sub, nil // sealed transport: wallet-vouched, relay-asserted
 		}
@@ -129,6 +164,9 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		if r.Header.Get(peerVerifiedHeader) == "true" {
 			if id := strings.TrimSpace(r.Header.Get(peerAppIDHeader)); id != "" {
 				if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
+					// Source telemetry for the dual-run: this path is
+					// deleted once it stays silent for a week.
+					log.Printf("[payer] legacy on-behalf-of from peer app %.8s… (no spend token)", id)
 					return sub, nil
 				}
 				return "app:" + id, nil
@@ -183,7 +221,15 @@ func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*h
 			return r, false
 		}
 	}
-	r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, sub))
+	ctx := context.WithValue(r.Context(), callerCtxKey{}, sub)
+	if strings.TrimSpace(r.Header.Get(payerHeader)) == sub {
+		ctx = context.WithValue(ctx, payerCtxKey{}, billing.Caller{
+			Sub: sub,
+			App: strings.ToLower(strings.TrimSpace(r.Header.Get(payerAppHeader))),
+			SID: strings.TrimSpace(r.Header.Get(payerSIDHeader)),
+		})
+	}
+	r = r.WithContext(ctx)
 	return r, true
 }
 

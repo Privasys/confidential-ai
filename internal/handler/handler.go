@@ -542,7 +542,7 @@ func (h *Handler) proxyPooling(w http.ResponseWriter, r *http.Request, task mode
 	// for a scorer they are the same thing (no completion tokens).
 	if rep := h.billingReporter(); rep != nil {
 		if id, in, ok := extractPoolingUsage(respBody); ok {
-			rep.Record(id, callerFromContext(r.Context()), inst.ModelName(), in, 0)
+			rep.RecordFor(id, callerInfoFromContext(r.Context()), inst.ModelName(), in, 0)
 		}
 	}
 
@@ -654,7 +654,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
 			if id, in, out, ok := extractUsage(respBody); ok {
-				rep.Record(id, callerFromContext(r.Context()), h.generateModelSlug(), in, out)
+				rep.RecordFor(id, callerInfoFromContext(r.Context()), h.generateModelSlug(), in, out)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -793,7 +793,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// from the forwarded stream so the response shape is unchanged.
 	var meter *meterCtx
 	if rep := h.billingReporter(); rep != nil {
-		meter = &meterCtx{reporter: rep, caller: callerFromContext(r.Context()), model: h.generateModelSlug()}
+		meter = &meterCtx{reporter: rep, caller: callerInfoFromContext(r.Context()), model: h.generateModelSlug()}
 		if reqParams.Stream {
 			clientHadUsage := false
 			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)
@@ -872,8 +872,8 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 type meterCtx struct {
 	reporter *billing.Reporter
 	// caller is the verified end-user subject usage is attributed to (empty =
-	// deployment-owner account).
-	caller string
+	// deployment-owner account), plus the spender app behind a spend token.
+	caller billing.Caller
 	// model is the serving instance's slug (empty = the reporter's default
 	// model, i.e. the chat LLM; the embed/rerank paths set their own slug so
 	// each model meters under its own ledger resource).
@@ -889,7 +889,7 @@ func (m *meterCtx) record(requestID string, in, out int64) {
 	if m == nil {
 		return
 	}
-	m.reporter.Record(requestID, m.caller, m.model, in, out)
+	m.reporter.RecordFor(requestID, m.caller, m.model, in, out)
 }
 
 // wantsReproducibility reports whether the caller opted in to the

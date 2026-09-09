@@ -34,9 +34,12 @@ import (
 //     numeric noise; kernel-level batch invariance (tracked upstream)
 //     remains the path to bitwise serve==replay under load.
 //
-// A replay is cache-cold by construction on either mode (fresh salt), so
-// the recorded seed + dynamic context reproduce the response exactly as
-// the strict contract promises.
+// A replay is cache-cold only under "strict": the session salt is per
+// CALLER, so a replay by the same user reuses the original's cached
+// prefix (seen 2026-09-10: identical prompt and seed, 97% cache hit, a
+// different reply). A caller that wants the recorded seed + dynamic
+// context to reproduce the response must send "strict" on the replay,
+// and on the original if it pinned the sampling (the harness does both).
 const (
 	kvCacheModeSession = "session"
 	kvCacheModeStrict  = "strict"

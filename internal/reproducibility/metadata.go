@@ -50,30 +50,11 @@ type Metadata struct {
 	// invariance ships. Nil when the upstream did not report the detail.
 	CachedTokens *int64 `json:"cached_tokens,omitempty"`
 
-	// DependencySetFold is the identity fold of the attested dependency set
-	// (OID 1.3.6.1.4.1.65230.7.1) this enclave was enforcing when the
-	// response was produced — the same set a verifier can read off the
-	// serving certificate. It commits to WHICH tool enclaves the assistant
-	// could reach, and because the fold folds in each dependency's own
-	// subtree, a change anywhere below ripples this value. Empty when no
-	// set is declared (off platform, or a runtime predating 6.1).
-	DependencySetFold string `json:"dependency_set_fold,omitempty"`
-
-	// ToolCalls, when non-nil, lists the MCP tool invocations that
-	// served this response (populated by the agentic loop). Each entry
-	// is a compact descriptor: {name, status, duration_ms, error?}.
-	// Unset for non-agentic completions.
-	ToolCalls []ToolCallSummary `json:"tool_calls,omitempty"`
-}
-
-// ToolCallSummary is the per-tool entry surfaced in the reproducibility
-// block so a verifier can replay the conversation and check both the
-// model AND the retrieval boundary.
-type ToolCallSummary struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	DurationMs int64  `json:"duration_ms"`
-	Error      string `json:"error,omitempty"`
+	// The block once carried dependency_set_fold and tool_calls, stamped by
+	// the agent loop that ran tools from this enclave. That loop now lives
+	// in the Privasys Harness, which records its own tool calls on its
+	// egress leg; this app reaches no other enclave, so there is no
+	// dependency set to commit to.
 }
 
 // PoolingMetadata is the compact reproducibility block for the pooling

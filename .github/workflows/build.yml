@@ -20,22 +20,12 @@ permissions:
   contents: read
   packages: write
 
-env:
-  # go.mod replaces enclave-os-mini/clients/go with the sibling checkout
-  # ../ra-tls-clients/go (same pattern as the CLI repo). Keep the ref in
-  # sync with the ARG default in Dockerfile/Dockerfile.prod.
-  RA_TLS_CLIENTS_REF: c6c63216dc5a0915569826e3ba2c1efdf44de6b0
-
 jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Fetch ra-tls-clients (go.mod replace)
-        run: |
-          git clone https://github.com/Privasys/ra-tls-clients "${GITHUB_WORKSPACE}/../ra-tls-clients"
-          git -C "${GITHUB_WORKSPACE}/../ra-tls-clients" checkout "${RA_TLS_CLIENTS_REF}"
       - uses: actions/setup-go@v6
         with:
           go-version: '1.22'
@@ -47,10 +37,6 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v6
-      - name: Fetch ra-tls-clients (go.mod replace)
-        run: |
-          git clone https://github.com/Privasys/ra-tls-clients "${GITHUB_WORKSPACE}/../ra-tls-clients"
-          git -C "${GITHUB_WORKSPACE}/../ra-tls-clients" checkout "${RA_TLS_CLIENTS_REF}"
       - uses: actions/setup-go@v6
         with:
           go-version: '1.22'

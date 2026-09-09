@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/privasys/confidential-ai/internal/agent"
 	"github.com/privasys/confidential-ai/internal/billing"
 	"github.com/privasys/confidential-ai/internal/config"
 	"github.com/privasys/confidential-ai/internal/models"
@@ -45,42 +44,9 @@ type Handler struct {
 	// engine this proxy supervises, so the key never needs to persist.
 	saltKey []byte
 
-	// depSet is the runtime-declared attested dependency set (OID 6.1) this
-	// enclave enforces its tool dials against. Nil when the agentic path is
-	// disabled; disabled (no-op) off platform.
-	depSet *agent.DepSet
 	// fleet coordinates the vLLM instances (generate + embed + rerank).
 	// nil in legacy mode (vLLM started by entrypoint.sh, single model).
 	fleet *models.Fleet
-
-	// agentCatalog + agentDispatcher are non-nil when MCPServers is set
-	// in config. When set, /v1/chat/completions runs through the
-	// agentic loop instead of a straight pass-through.
-	agentCatalog    *agent.Catalog
-	agentDispatcher *agent.Dispatcher
-	agentConsent    *agent.ConsentRegistry
-	// agentCatClient / agentDispClient are the HTTP clients the admin
-	// catalogue and dispatcher were built with (attested RA-TLS transport
-	// unless MCP_RATLS=0). The per-request grant-union path MUST reuse
-	// them: a plain http.Client hits the gateway's terminated leg and the
-	// tool's enclave refuses it (sealed-transport-required), silently
-	// dropping every granted tool from the ephemeral catalogue.
-	agentCatClient  *http.Client
-	agentDispClient *http.Client
-
-	// grantVerifier verifies the per-request X-Privasys-Tool-Grant header so
-	// a user's own tools can be unioned with the configured catalogue for
-	// that request only. Held behind an atomic pointer because the tool-spec
-	// syncer installs/swaps it at runtime: env vars are not deliverable to
-	// container apps, so grant config (JWKS URL + audience) arrives
-	// server-driven from the mgmt-service tool-spec endpoint, exactly like
-	// MCP_SERVERS. nil / Load()==nil means grants are not configured.
-	grantVerifier atomic.Pointer[agent.GrantVerifier]
-	// grantMu serializes SetGrantVerifierFromSpec; grantJWKS/grantAud hold the
-	// live config so an unchanged tool-spec poll is a cheap no-op.
-	grantMu   sync.Mutex
-	grantJWKS string
-	grantAud  string
 
 	// oidcVerifier is non-nil when OIDCIssuer is configured. It validates
 	// platform bearer tokens offline (JWKS) so privileged endpoints
@@ -121,25 +87,12 @@ type Handler struct {
 
 // New creates a Handler with the given config and model fleet.
 // If fleet is nil, falls back to legacy mode (polling vLLM at startup).
-// driveServerFromConfig builds the built-in Privasys Drive MCP tool server
-// (§8.7 RAG-in-enclave) when DriveMCPURL is configured, or nil to disable it.
-// Drive speaks the privasys_http MCP shape and authenticates the assistant
-// path with the interim shared secret; the acting user is asserted per call
-// via X-Privasys-On-Behalf-Of.
-func driveServerFromConfig(cfg *config.Config) *agent.Server {
-	if cfg.DriveMCPURL == "" {
-		return nil
-	}
-	return &agent.Server{
-		Name:           "drive",
-		BaseURL:        strings.TrimRight(cfg.DriveMCPURL, "/"),
-		Transport:      agent.TransportPrivasysHTTP,
-		AuthMode:       agent.AuthModeAssistant,
-		AssistantToken: cfg.DriveAssistantToken,
-		ExpectedDigest: cfg.DriveExpectedDigest,
-	}
-}
-
+//
+// This is an inference app and nothing else: it serves the models it loads
+// and calls no other enclave. The agent loop that once ran tools from here
+// (MCP servers, tool grants, the Drive RAG built-in) moved to the Privasys
+// Harness, which dispatches its own tools client-side and reaches this app
+// as an attested peer.
 func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	h := &Handler{
 		cfg:     cfg,
@@ -152,58 +105,6 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	// Legacy mode: poll vLLM health at startup if the fleet is not used.
 	if fleet == nil && cfg.ModelName != "" {
 		go h.pollUpstreamReady()
-	}
-	servers, specErr := agent.ParseServerSpec(cfg.MCPServers)
-	driveSrv := driveServerFromConfig(cfg)
-	if driveSrv != nil {
-		servers = append(servers, *driveSrv)
-	}
-	if specErr != nil {
-		log.Printf("[agent] MCP_SERVERS parse error: %v (agentic loop disabled)", specErr)
-	} else if len(servers) > 0 || cfg.ToolSpecURL != "" || cfg.ToolGrantJWKSURL != "" {
-		// The catalogue is always created when the puller is enabled,
-		// even if the static MCP_SERVERS is empty: the puller will
-		// populate it on first poll and may continue to mutate it as
-		// the fleet's tool set changes. It is likewise created when only
-		// per-request tool grants are enabled, so the agentic path is
-		// reachable for fleets whose tools are all user-supplied.
-		// MCP transport: attested RA-TLS by default — the enclave gateways
-		// refuse plaintext app traffic on the terminated leg
-		// (sealed-transport-required), and tool arguments/results are user
-		// data. MCP_RATLS=0 falls back to plain HTTP for local dev.
-		catClient := &http.Client{Timeout: 15 * time.Second}
-		dispClient := &http.Client{Timeout: 60 * time.Second}
-		if cfg.MCPRATLS {
-			base := agent.NewRATLSTransport()
-			// Attested dependency set (OID 6.1): the pins the RUNTIME
-			// declares for this workload, which are exactly what our own
-			// serving certificate advertises. Loaded from the local manager
-			// and refreshed so an operator-approved change takes effect
-			// without a restart. Disabled off platform, where the per-host
-			// digest pins below remain the only gate.
-			h.depSet = agent.NewDepSet()
-			h.depSet.Start(time.Minute)
-			base.Deps = h.depSet
-			var rt http.RoundTripper = base
-			// Pin the built-in Drive server to its attested digest on the
-			// shared transport (other hosts pass through unpinned).
-			if driveSrv != nil && driveSrv.ExpectedDigest != "" {
-				rt = agent.PinnedEnclaveTransport(rt, []agent.Server{*driveSrv})
-			}
-			catClient.Transport = rt
-			dispClient.Transport = rt
-		}
-		h.agentCatalog = agent.NewCatalog(servers, catClient, 60*time.Second)
-		h.agentDispatcher = agent.NewDispatcher(h.agentCatalog, dispClient)
-		h.agentConsent = agent.NewConsentRegistry()
-		h.agentCatClient = catClient
-		h.agentDispClient = dispClient
-		log.Printf("[agent] enabled (static-servers=%d, puller=%v, grants=%v, ratls=%v)", len(servers), cfg.ToolSpecURL != "", cfg.ToolGrantJWKSURL != "", cfg.MCPRATLS)
-	}
-	if cfg.ToolGrantJWKSURL != "" {
-		// Startup env path (kept for parity / non-fleet deployments). The
-		// tool-spec syncer can later swap this to server-driven config.
-		h.SetGrantVerifierFromSpec(cfg.ToolGrantJWKSURL, cfg.ToolGrantAudience)
 	}
 	if cfg.OIDCIssuer != "" {
 		h.oidcVerifier = NewOIDCVerifier(cfg.OIDCIssuer, cfg.OIDCAudience)
@@ -229,27 +130,6 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 		log.Printf("[billing] inference metering enabled from env (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
 	}
 	return h
-}
-
-// SetGrantVerifierFromSpec installs (or swaps) the tool-grant verifier at
-// runtime from server-driven config delivered by the mgmt-service tool-spec
-// endpoint (the same channel that feeds MCP_SERVERS). Idempotent: an unchanged
-// (jwksURL, audience) is a no-op. An empty jwksURL clears the verifier
-// (grants disabled). Safe for concurrent callers.
-func (h *Handler) SetGrantVerifierFromSpec(jwksURL, audience string) {
-	h.grantMu.Lock()
-	defer h.grantMu.Unlock()
-	if jwksURL == h.grantJWKS && audience == h.grantAud {
-		return
-	}
-	h.grantJWKS, h.grantAud = jwksURL, audience
-	if jwksURL == "" {
-		h.grantVerifier.Store(nil)
-		log.Printf("[agent] per-request tool grants disabled")
-		return
-	}
-	h.grantVerifier.Store(agent.NewGrantVerifier(jwksURL, audience))
-	log.Printf("[agent] per-request tool grants enabled (jwks=%s, aud=%q)", jwksURL, audience)
 }
 
 // StartBilling starts the background usage-reporting loop, if metering is
@@ -317,12 +197,6 @@ func (h *Handler) generateModelSlug() string {
 	}
 	return h.cfg.ModelName
 }
-
-// AgentCatalog exposes the live agent catalogue so external goroutines
-// (e.g. the tool-spec puller in cmd/server) can mutate it via
-// Catalog.Replace. Returns nil when the agentic loop is disabled (no
-// MCP_SERVERS and no --tool-spec-url).
-func (h *Handler) AgentCatalog() *agent.Catalog { return h.agentCatalog }
 
 // pollUpstreamReady polls vLLM's /health endpoint until it returns 200,
 // then sets h.ready to 1. This runs in the background so the proxy can
@@ -393,10 +267,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /.well-known/served-models", h.servedModels)
 	mux.HandleFunc("GET /metrics", h.metrics)
-	mux.HandleFunc("POST /v1/agent/confirm/{id}", h.agentConfirm)
-	mux.HandleFunc("GET /v1/tools", h.toolServers)
-	mux.HandleFunc("GET /v1/tools/{server}/settings", h.toolSettings)
-	mux.HandleFunc("PUT /v1/tools/{server}/settings", h.toolSettings)
 	// Billing configure is a privileged surface: it names where usage
 	// reports go and the bearer they carry, so an open endpoint lets anyone
 	// reachable over the RA-TLS-direct leg disable metering or steal the
@@ -530,47 +400,26 @@ func subtleEq(a, b string) bool {
 // chatCompletions proxies to vLLM /v1/chat/completions and injects
 // reproducibility metadata into the response.
 //
-// When an MCP-backed agent dispatcher is configured we normally run the
-// bounded tool-call loop so the server can execute tools on behalf of
-// the client. That assumes ALL `tools` in the request are server-side
-// (the chat UI sends none and lets us inject our catalogue). Clients
-// like Zed send their OWN client-side tools (e.g. `list_directory`) and
-// expect to dispatch them themselves: they want the raw OpenAI SSE with
-// `tool_calls` deltas, NOT our `tool_call` / `tool_result` events, and
-// our dispatcher would otherwise reject the unknown names with
-// "malformed tool name (expected <server>__<tool>)". Detect that case
-// and use the plain pass-through proxy instead.
+// Tools are always the CLIENT's: this app dispatches nothing. A caller
+// that sends its own `tools` (Zed, the attested harness) expects the raw
+// OpenAI SSE with `tool_calls` deltas, and a strict client rejects any
+// non-chat-chunk `data:` frame, so such a request gets the plain
+// pass-through UNLESS the caller opted in with X-Privasys-Reproducibility,
+// which is precisely the declaration that it parses the extension (the
+// harness does, and records the block on its egress leg).
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	r, ok := h.authorizeInference(w, r)
 	if !ok {
 		return
 	}
-	if h.agentDispatcher != nil {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-		if err != nil {
-			h.requestsFailed.Add(1)
-			writeError(w, http.StatusBadRequest, "failed to read request body")
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		if !hasClientTools(body) {
-			h.chatCompletionsAgentic(w, r)
-			return
-		}
-		// Client supplied its own tools (e.g. Zed). It speaks plain
-		// OpenAI streaming and usually cannot parse our `reproducibility`
-		// SSE event — its stream parser rejects any non-chat-chunk
-		// `data:` frame. Use the strict pass-through path — UNLESS the
-		// caller explicitly opted in: the X-Privasys-Reproducibility
-		// header is precisely the declaration that it parses the
-		// extension. The attested harness is that caller — it dispatches
-		// its own tools client-side AND records the repro block on its
-		// egress leg (found 2026-08-27: the passthrough silently dropped
-		// the block for it despite the opt-in).
-		if wantsReproducibility(r) {
-			h.proxyWithReproducibility(w, r, "/v1/chat/completions")
-			return
-		}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if hasClientTools(body) && !wantsReproducibility(r) {
 		h.proxyPassthrough(w, r, "/v1/chat/completions")
 		return
 	}
@@ -1009,7 +858,6 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	)
 	meta.DynamicContext = dynCtx
 	meta.KVCacheMode = kvMode
-	meta.DependencySetFold = h.dependencyFold()
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
@@ -1042,17 +890,6 @@ func (m *meterCtx) record(requestID string, in, out int64) {
 		return
 	}
 	m.reporter.Record(requestID, m.caller, m.model, in, out)
-}
-
-// dependencyFold returns the identity fold of the attested dependency set
-// this enclave is enforcing, or "" when none is declared. Stamped into every
-// reproducibility block so a response commits to the tool surface that
-// served it, not just to the model.
-func (h *Handler) dependencyFold() string {
-	if h.depSet == nil {
-		return ""
-	}
-	return h.depSet.Fold()
 }
 
 // wantsReproducibility reports whether the caller opted in to the
@@ -1520,26 +1357,10 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 			})
 		}
 	}
-	// OID 1.3.6.1.4.1.65230.5.4.7 (TOOLS_DIGEST): sha256 over the
-	// canonical, sorted JSON of the configured MCP servers (name,
-	// base_url, transport, auth_mode, audience, confirm). A verifier
-	// can recompute this from the management-service ai_tools rows
-	// to prove the container is exposing the expected toolset.
-	// Lives under the app arc 3.5.* — it is this app's own extension,
-	// not a platform-standard OID; top-level 3.x slots are reserved for
-	// manager-stamped extensions. (Emitted at the top-level 3.7 until
-	// fleet v0.4.x — enclave images from tdx-v0.2.56-dev drop any
-	// container-declared OID outside 3.5/3.5.* at issuance.)
-	if h.agentCatalog != nil {
-		if td := h.agentCatalog.ServersDigest(); td != "" {
-			if tdBytes, err := hex.DecodeString(td); err == nil && len(tdBytes) > 0 {
-				exts = append(exts, entry{
-					OID:   "1.3.6.1.4.1.65230.5.4.7",
-					Value: base64.StdEncoding.EncodeToString(tdBytes),
-				})
-			}
-		}
-	}
+	// OID 1.3.6.1.4.1.65230.5.4.7 (TOOLS_DIGEST) is no longer emitted: this
+	// app exposes no tool set of its own since the agent loop moved to the
+	// Privasys Harness. A verifier that still expects it reads its absence
+	// as "no tools", which is the truth.
 	if exts == nil {
 		exts = []entry{}
 	}

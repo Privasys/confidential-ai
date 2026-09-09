@@ -558,7 +558,6 @@ func TestChatCompletionsClientToolsReproOptIn(t *testing.T) {
 	h := New(&config.Config{
 		ModelName:    "m",
 		VLLMUpstream: vllm.URL,
-		MCPServers:   "rag=http://127.0.0.1:1/unused", // dispatcher present, never dispatched
 		TeeType:      "tdx",
 	}, nil)
 	h.ready.Store(1)

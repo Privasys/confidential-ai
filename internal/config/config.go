@@ -75,76 +75,6 @@ type Config struct {
 	// env: REVOKED_SIDS_INTERVAL.
 	RevokedSidsInterval time.Duration
 
-	// MCPRATLS routes the agent loop's MCP calls (tool discovery + tool
-	// invocations, transport privasys_http) over per-request attested
-	// RA-TLS connections to the tool enclaves instead of gateway-terminated
-	// HTTPS. The enclave gateways refuse plaintext app traffic on the
-	// terminated leg (sealed-transport-required), so this is REQUIRED for
-	// tools to work on the platform; disable only for local dev against
-	// plain-HTTP MCP servers. Default true. env: MCP_RATLS.
-	MCPRATLS bool
-
-	// MCPServers, when non-empty, enables the agentic tool-call loop
-	// on POST /v1/chat/completions. Format (env MCP_SERVERS):
-	//
-	//   name1=https://url1[?bearer=1],name2=https://url2,...
-	//
-	// `bearer=1` opts the server in to receiving the user's
-	// Authorization header from the original chat request (required
-	// for private-rag, optional for stateless tools like lightpanda).
-	// When MCPServers is empty the proxy behaves exactly as before
-	// (pure pass-through to vLLM).
-	MCPServers string
-
-	// ToolSpecURL, when non-empty, enables the background tool-spec
-	// puller. The proxy polls this URL every ToolSpecInterval and
-	// atomically replaces the agent.Catalog's server list with the
-	// returned spec string (see internal/agent/spec.go::ParseServerSpec
-	// for format). This is how managed instances (e.g. confidential-ai
-	// running inside an enclave alongside the workload manager) pick
-	// up fleet-level tool-set changes without a container restart.
-	//
-	// The endpoint must return JSON: {"spec":"...","generation":"..."}.
-	// When ToolSpecURL is empty the puller is disabled and the tool
-	// catalogue is fixed to whatever MCPServers resolved to at startup.
-	ToolSpecURL string
-
-	// ToolSpecToken, when non-empty, is sent as `Authorization: Bearer
-	// <token>` on every ToolSpecURL poll. Typically a static
-	// machine-to-machine credential issued to the enclave by the
-	// management service.
-	ToolSpecToken string
-
-	// ToolSpecInterval is the polling cadence for ToolSpecURL.
-	// Defaults to 60s when zero. Ignored when ToolSpecURL is empty.
-	ToolSpecInterval time.Duration
-
-	// ToolGrantJWKSURL, when non-empty, enables per-request user tool
-	// grants. The proxy verifies the X-Privasys-Tool-Grant header (an
-	// ES256 JWS minted by the chat back-end) against this JWKS and, for a
-	// valid grant, unions the grant's tool servers with the configured
-	// catalogue for that single request. The browser supplies only the
-	// grant, never a raw server URL. Empty disables the feature (the
-	// header is ignored and only the configured catalogue is used).
-	ToolGrantJWKSURL string
-
-	// ToolGrantAudience is the `aud` a grant must carry to be accepted —
-	// this instance's id. Empty skips the audience check (dev only).
-	ToolGrantAudience string
-
-	// Drive RAG (§8.7 RAG-in-enclave): when DriveMCPURL is set, Privasys
-	// Drive is registered as a built-in MCP tool server so the agent can
-	// search the signed-in user's Drive (memory, semantic search, section /
-	// file reads). Calls go over attested RA-TLS pinned to
-	// DriveExpectedDigest, carrying `Authorization: Assistant
-	// <DriveAssistantToken>` and the caller's sub in X-Privasys-On-Behalf-Of.
-	// DriveAssistantToken is the interim shared secret matching Drive's
-	// assistant_enclave_token; it is replaced by inbound mutual RA-TLS
-	// later. Empty DriveMCPURL disables the built-in.
-	DriveMCPURL         string
-	DriveAssistantToken string
-	DriveExpectedDigest string
-
 	// CORSOrigins is a comma-separated allowlist of HTTP Origins that
 	// receive Access-Control-Allow-* response headers. Defaults to the
 	// Privasys chat front-ends. Empty disables CORS entirely (browser
@@ -249,26 +179,6 @@ func Parse(args []string) (*Config, error) {
 		"IdP revoked-session feed to poll; empty derives <OIDC_ISSUER>/sessions/revoked (env: REVOKED_SIDS_URL)")
 	fs.DurationVar(&cfg.RevokedSidsInterval, "revoked-sids-interval", envDuration("REVOKED_SIDS_INTERVAL", 60*time.Second),
 		"Revoked-sid poll cadence (env: REVOKED_SIDS_INTERVAL)")
-	fs.BoolVar(&cfg.MCPRATLS, "mcp-ratls", envBool("MCP_RATLS", true),
-		"Carry MCP tool calls over per-request attested RA-TLS to the tool enclaves; disable only for local dev against plain-HTTP servers (env: MCP_RATLS)")
-	fs.StringVar(&cfg.MCPServers, "mcp-servers", envOr("MCP_SERVERS", ""),
-		"Comma-separated <name>=<url>[?bearer=1] list of MCP servers to expose as tools (env: MCP_SERVERS)")
-	fs.StringVar(&cfg.DriveMCPURL, "drive-mcp-url", envOr("DRIVE_MCP_URL", ""),
-		"Privasys Drive base URL to register as a built-in RAG tool server (§8.7); empty disables it (env: DRIVE_MCP_URL)")
-	fs.StringVar(&cfg.DriveAssistantToken, "drive-assistant-token", envOr("DRIVE_ASSISTANT_TOKEN", ""),
-		"Interim shared secret sent as `Authorization: Assistant <token>` to Drive (matches its assistant_enclave_token) (env: DRIVE_ASSISTANT_TOKEN)")
-	fs.StringVar(&cfg.DriveExpectedDigest, "drive-expected-digest", envOr("DRIVE_EXPECTED_DIGEST", ""),
-		"Attested workload digest (OID 3.2 hex) to pin Drive's enclave on the RA-TLS dial (env: DRIVE_EXPECTED_DIGEST)")
-	fs.StringVar(&cfg.ToolSpecURL, "tool-spec-url", envOr("TOOL_SPEC_URL", ""),
-		"When set, the proxy polls this URL for {spec,generation} and hot-reloads the tool catalogue (env: TOOL_SPEC_URL)")
-	fs.StringVar(&cfg.ToolSpecToken, "tool-spec-token", envOr("TOOL_SPEC_TOKEN", ""),
-		"Bearer token sent on every tool-spec-url poll (env: TOOL_SPEC_TOKEN)")
-	fs.DurationVar(&cfg.ToolSpecInterval, "tool-spec-interval", envDuration("TOOL_SPEC_INTERVAL", 60*time.Second),
-		"How often to poll tool-spec-url (env: TOOL_SPEC_INTERVAL, e.g. 30s)")
-	fs.StringVar(&cfg.ToolGrantJWKSURL, "tool-grant-jwks-url", envOr("TOOL_GRANT_JWKS_URL", ""),
-		"When set, verify X-Privasys-Tool-Grant against this JWKS and union the grant's tools per request (env: TOOL_GRANT_JWKS_URL)")
-	fs.StringVar(&cfg.ToolGrantAudience, "tool-grant-audience", envOr("TOOL_GRANT_AUDIENCE", ""),
-		"Expected aud claim on a tool-grant (this instance's id); empty skips the check (env: TOOL_GRANT_AUDIENCE)")
 	fs.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("CORS_ORIGINS", "https://chat.privasys.org,https://chat.test.privasys.org,http://localhost:4210,http://localhost:3000"),
 		"Comma-separated CORS Origin allowlist (env: CORS_ORIGINS)")
 

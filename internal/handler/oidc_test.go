@@ -368,50 +368,6 @@ func TestRequireLoadAuth_OIDCConfiguredLegacyFallback(t *testing.T) {
 
 // An attested peer that names the user it acts for is metered as that user
 // ("the user pays"); without a peer verdict the header is inert.
-func TestResolveCaller_AttestedPeerOnBehalfOf(t *testing.T) {
-	issuer, _ := jwksTestIDP(t)
-	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
-
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r.Header.Set(peerVerifiedHeader, "true")
-	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
-	r.Header.Set(onBehalfOfHeader, "  user-pairwise-sub  ")
-	if sub, err := h.resolveCaller(r); err != nil || sub != "user-pairwise-sub" {
-		t.Fatalf("verified peer on behalf of user: sub=%q err=%v", sub, err)
-	}
-
-	// Blank on-behalf-of falls back to the app identity.
-	r.Header.Set(onBehalfOfHeader, "   ")
-	if sub, err := h.resolveCaller(r); err != nil || sub != "app:590ebdc31b63401fbbb822d5f3886c5e" {
-		t.Fatalf("blank on-behalf-of must fall back to the app: sub=%q err=%v", sub, err)
-	}
-
-	// No peer verdict: the header names nobody.
-	for _, hdrs := range []map[string]string{
-		{onBehalfOfHeader: "user-pairwise-sub"},
-		{peerVerifiedHeader: "false", peerAppIDHeader: "590ebdc31b63401fbbb822d5f3886c5e", onBehalfOfHeader: "user-pairwise-sub"},
-		{peerVerifiedHeader: "true", onBehalfOfHeader: "user-pairwise-sub"}, // verdict without app id
-	} {
-		r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
-		for k, v := range hdrs {
-			r.Header.Set(k, v)
-		}
-		if sub, err := h.resolveCaller(r); err != nil || sub != "" {
-			t.Fatalf("unverified on-behalf-of %v must stay anonymous: sub=%q err=%v", hdrs, sub, err)
-		}
-	}
-
-	// The relay-asserted subject (a sealed session) still wins over a peer
-	// verdict: it is checked first and never combined with app headers.
-	r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r.Header.Set(relaySubHeader, "sealed-user")
-	r.Header.Set(peerVerifiedHeader, "true")
-	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
-	r.Header.Set(onBehalfOfHeader, "user-pairwise-sub")
-	if sub, err := h.resolveCaller(r); err != nil || sub != "sealed-user" {
-		t.Fatalf("relay subject precedence: sub=%q err=%v", sub, err)
-	}
-}
 
 // POST /configure (billing) is privileged: the app owner/admin roles pass
 // as for load/unload, and so does the platform manager role the
@@ -515,7 +471,7 @@ func TestResolveCaller_SpendTokenPayer(t *testing.T) {
 	r.Header.Set(relaySubHeader, "sealed-user")
 	r.Header.Set(peerVerifiedHeader, "true")
 	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
-	r.Header.Set(onBehalfOfHeader, "legacy-user")
+	r.Header.Set("X-Privasys-On-Behalf-Of", "legacy-user")
 	sub, err := h.resolveCaller(r)
 	if err != nil || sub != "user-pairwise-sub" {
 		t.Fatalf("payer: sub=%q err=%v", sub, err)
@@ -541,5 +497,34 @@ func TestResolveCaller_SpendTokenPayer(t *testing.T) {
 	}
 	if c := callerInfoFromContext(r3b.Context()); c.Sub != "sealed-user" || c.App != "" || c.SID != "" {
 		t.Fatalf("relay attribution: %+v", c)
+	}
+}
+
+// An app-supplied acting user is never the caller, with or without the
+// manager's peer verdict: a verified peer that names a user is metered as
+// the app itself. Only the spend-token payer the runtime asserted, a
+// bearer, or the relay subject name a person.
+func TestResolveCaller_IgnoresAppSuppliedActingUser(t *testing.T) {
+	issuer, _ := jwksTestIDP(t)
+	h := &Handler{cfg: &config.Config{OIDCIssuer: issuer}, oidcVerifier: NewOIDCVerifier(issuer, "")}
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(peerVerifiedHeader, "true")
+	r.Header.Set(peerAppIDHeader, "590ebdc31b63401fbbb822d5f3886c5e")
+	r.Header.Set("X-Privasys-On-Behalf-Of", "user-pairwise-sub")
+	if sub, err := h.resolveCaller(r); err != nil || sub != "app:590ebdc31b63401fbbb822d5f3886c5e" {
+		t.Fatalf("verified peer naming a user must be metered as the app: sub=%q err=%v", sub, err)
+	}
+	for _, hdrs := range []map[string]string{
+		{"X-Privasys-On-Behalf-Of": "user-pairwise-sub"},
+		{peerVerifiedHeader: "false", peerAppIDHeader: "590ebdc31b63401fbbb822d5f3886c5e", "X-Privasys-On-Behalf-Of": "user-pairwise-sub"},
+	} {
+		r = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		for k, v := range hdrs {
+			r.Header.Set(k, v)
+		}
+		if sub, err := h.resolveCaller(r); err != nil || sub != "" {
+			t.Fatalf("unverified app-supplied user %v must stay anonymous: sub=%q err=%v", hdrs, sub, err)
+		}
 	}
 }

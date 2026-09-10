@@ -87,16 +87,6 @@ const (
 	peerAppIDHeader    = "X-Privasys-Peer-App-Id"
 )
 
-// onBehalfOfHeader names the end user an attested peer app is acting for.
-// Honoured ONLY behind a manager-verified peer verdict: an allowed caller
-// (the harness, Drive) binds its acting user in its own measured code and
-// the ingress verifier has already proven which code that is, so the value
-// is as trustworthy as the peer identity itself. The user, not the app, is
-// then the metered caller ("the user pays", decision 2026-09-08). Without
-// a peer verdict the header is ignored, so nothing outside an attested
-// peer can name a payer.
-const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
-
 // Spend tokens (acting-subject plan v2). The enclave runtime verifies the
 // caller app's spend token and per-request proof on ingress and asserts
 // the PAYING USER here: the user who allowed that app to spend their
@@ -156,19 +146,16 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		// caller's attested client certificate (quote, measurements, allowed-
 		// callers policy, channel binder) and asserted its identity in these
 		// headers — which it strips from every non-verified path, so they
-		// cannot be spoofed from outside. When the peer names the user it acts
-		// for (onBehalfOfHeader), that user is the caller and pays; otherwise
-		// the caller is the attested APP itself, and the "app:" prefix keeps
-		// the subject space disjoint from pairwise user subs for metering
-		// and billing.
+		// cannot be spoofed from outside. The caller is the attested APP
+		// itself; the "app:" prefix keeps the subject space disjoint from
+		// pairwise user subs for metering and billing. An app-supplied
+		// acting user (the former X-Privasys-On-Behalf-Of) is NOT honoured:
+		// the app may say whom it serves, but only the platform (the spend
+		// token payer above) or the person's own credential may say who
+		// pays — with the any-attested caller policy an app-asserted name
+		// would let any admitted app bill anyone.
 		if r.Header.Get(peerVerifiedHeader) == "true" {
 			if id := strings.TrimSpace(r.Header.Get(peerAppIDHeader)); id != "" {
-				if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
-					// Source telemetry for the dual-run: this path is
-					// deleted once it stays silent for a week.
-					log.Printf("[payer] legacy on-behalf-of from peer app %.8s… (no spend token)", id)
-					return sub, nil
-				}
 				return "app:" + id, nil
 			}
 		}

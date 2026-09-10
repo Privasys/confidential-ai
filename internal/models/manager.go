@@ -743,7 +743,6 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// superseded before Start means nothing was spawned and nothing to
 	// kill; just walk away.
 	if !m.ifGen(gen, func() {
-		m.cmd = cmd
 		m.message = "Starting vLLM process..."
 	}) {
 		return
@@ -751,6 +750,20 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 
 	if err := cmd.Start(); err != nil {
 		m.setFailed(gen, "failed to start vLLM: "+err.Error())
+		return
+	}
+	// Published only AFTER Start: Unload reads cmd.Process under its own
+	// copy of m.cmd, and Start writes cmd.Process without our lock, so an
+	// earlier publication raced (caught by -race in CI, 2026-09-10). A
+	// load superseded in the gap owns a process nobody else can see:
+	// kill its group here and reap it, then walk away.
+	if !m.ifGen(gen, func() {
+		m.cmd = cmd
+	}) {
+		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+		go func() { _ = cmd.Wait() }()
 		return
 	}
 	registerLiveVLLM(m.task)

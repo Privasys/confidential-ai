@@ -34,12 +34,12 @@ import (
 //     numeric noise; kernel-level batch invariance (tracked upstream)
 //     remains the path to bitwise serve==replay under load.
 //
-// A replay is cache-cold only under "strict": the session salt is per
-// CALLER, so a replay by the same user reuses the original's cached
-// prefix (seen 2026-09-10: identical prompt and seed, 97% cache hit, a
-// different reply). A caller that wants the recorded seed + dynamic
-// context to reproduce the response must send "strict" on the replay,
-// and on the original if it pinned the sampling (the harness does both).
+// Cache warmth is NOT what breaks reproduction: measured 2026-09-10 on
+// qwen36-35b-a3b-fp8, the same request (same seed, same dynamic context)
+// served cache-cold, cache-warm (16k cached tokens) and strict gave the
+// same tokens as long as it ran ALONE on the engine; what changed the
+// tokens was another request in the same batch. "strict" therefore also
+// carries the exclusivity request (see genGate in handler.go).
 const (
 	kvCacheModeSession = "session"
 	kvCacheModeStrict  = "strict"

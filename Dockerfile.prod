@@ -131,6 +131,18 @@ RUN cd /usr/local/lib/python3.12/dist-packages && \
 # Go proxy reads the same variable for the reproducibility block.
 ENV VLLM_BATCH_INVARIANT=1
 
+# Model Runner V1, not the V2 that v0.29.0 made the default (#53183). On a
+# TDX guest with the H100 in confidential-computing mode, V2's first decode
+# step dies with a CUDA device-side assert (ATen ScatterGatherKernel "index
+# out of bounds", launched from V2's background execution thread), the API
+# server survives its engine core, and the manager keeps reporting ready
+# with a refused port. Reproduced 2026-09-10 on a dev CVM under the real
+# enclave runtime with the exact prod flags; the same image serves fine on
+# a plain (non-CC) H100 VM, and V1 serves fine on the CVM with batch
+# invariance on and holding (solo / concurrent / solo byte-identical). V1
+# is what 0.28.0 ran in prod. Revisit when V2 is proven under CC mode.
+ENV VLLM_USE_V2_MODEL_RUNNER=0
+
 # Disable vLLM's unconditional Qwen Triton warmup (still present and
 # still unconditional at 0.28.0 — the assert below is the tripwire)
 # (vllm/model_executor/warmup/qwen_triton_warmup.py). On the H100 TDX

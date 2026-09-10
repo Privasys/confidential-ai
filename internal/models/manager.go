@@ -848,19 +848,89 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// The load reached ready: the JIT/compile caches are consistent.
 	m.clearDirtyLoadSentinel()
 
-	// Wait for process exit (blocks until vLLM dies or is killed).
-	if err := <-waitCh; err != nil {
-		// gen guard: after an Unload/supersede this crash belongs to the
-		// old load and must not fail the new one.
-		m.ifGen(gen, func() {
-			if m.state == StateReady {
-				// Unexpected crash: surface the stderr tail, not just the
-				// exit code.
-				m.state = StateFailed
-				m.loadErr = "vLLM process exited unexpectedly: " + err.Error() + m.stderrTailSuffix()
+	// Wait for process exit (blocks until vLLM dies or is killed), or for
+	// the engine to stop answering: on 2026-09-10 an EngineCore died on a
+	// CUDA assert, the API server closed its port but its process tree
+	// lingered (a zombie child under our PID 1), so cmd.Wait never
+	// returned and this instance reported "ready" with a refused port
+	// until an operator noticed. A ready engine that fails its health
+	// check livenessStrikes times in a row is declared dead here: the
+	// group is killed, the tail surfaced, exactly as for a clean exit.
+	livenessTick := time.NewTicker(livenessInterval)
+	defer livenessTick.Stop()
+	strikes := 0
+	for {
+		select {
+		case err := <-waitCh:
+			if err != nil {
+				// gen guard: after an Unload/supersede this crash belongs to the
+				// old load and must not fail the new one.
+				m.ifGen(gen, func() {
+					if m.state == StateReady {
+						// Unexpected crash: surface the stderr tail, not just the
+						// exit code.
+						m.state = StateFailed
+						m.loadErr = "vLLM process exited unexpectedly: " + err.Error() + m.stderrTailSuffix()
+					}
+				})
 			}
-		})
+			return
+		case <-livenessTick.C:
+			if m.healthOK(ctx) {
+				strikes = 0
+				continue
+			}
+			strikes++
+			if strikes < livenessStrikes {
+				continue
+			}
+			dead := m.ifGen(gen, func() {
+				if m.state == StateReady {
+					m.state = StateFailed
+					m.loadErr = fmt.Sprintf("vLLM stopped answering its health check (%d consecutive failures after ready)", strikes) + m.stderrTailSuffix()
+				}
+			})
+			if !dead {
+				return // superseded: Unload owns the process now
+			}
+			log.Printf("[models %s] engine unresponsive after ready; killing its process group", m.task)
+			if pgid, perr := syscall.Getpgid(cmd.Process.Pid); perr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGTERM)
+				time.Sleep(2 * time.Second)
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = cmd.Process.Kill()
+			}
+			<-waitCh
+			return
+		}
 	}
+}
+
+// Liveness after readiness: how often the engine's /health is probed and
+// how many consecutive failures declare it dead. Generous enough to ride
+// out a long CUDA-graph replay or a JIT stall, short enough that a dead
+// engine is reported in under a minute.
+const (
+	livenessInterval = 10 * time.Second
+	livenessStrikes  = 4
+)
+
+// healthOK reports whether the engine's own /health answers 200 within a
+// short deadline.
+func (m *Manager) healthOK(ctx context.Context) bool {
+	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(hctx, http.MethodGet, m.Upstream()+"/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // vllmExitError marks a readiness failure caused by the vLLM process
@@ -1060,7 +1130,10 @@ func (m *Manager) resolveModelPath(model string) string {
 // log: Python tracebacks and their frames, engine-core deaths, CUDA and
 // out-of-memory errors, kernel kills. Progress bars and INFO chatter never
 // match.
-var failureLine = regexp.MustCompile(`Traceback \(most recent call last\)|^\s*File ".*", line \d+|Error|error:|EngineCore|CUDA|out of memory|OutOfMemory|Killed|Segmentation|core dumped|assert`)
+// Case-insensitive on purpose: the CUDA runtime prints a device-side
+// assert as "…: block: [..], thread: [..] Assertion `…` failed." (first
+// missed 2026-09-10, when only the Python trace got through).
+var failureLine = regexp.MustCompile(`(?i)Traceback \(most recent call last\)|^\s*File ".*", line \d+|Error|EngineCore|CUDA|out of memory|Killed|Segmentation|core dumped|assert|block: \[`)
 
 // forwardBudget bounds how many failure lines reach the container log:
 // a burst allowance so a whole traceback (frames included) gets through,

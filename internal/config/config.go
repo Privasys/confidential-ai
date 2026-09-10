@@ -21,7 +21,11 @@ type Config struct {
 	ImageDigest  string // CVM image SHA256 digest
 	CUDAVersion  string // CUDA version string
 	VLLMVersion  string // vLLM version string
-	TeeType      string // TEE type: tdx, sev-snp
+	// BatchInvariance mirrors VLLM_BATCH_INVARIANT, the variable every
+	// vLLM engine this process starts inherits (Dockerfile.prod sets it):
+	// the reproducibility block reports what the engine actually runs.
+	BatchInvariance bool
+	TeeType         string // TEE type: tdx, sev-snp
 
 	// RoothashDir is the directory written by disk-mounter on the host
 	// containing per-model dm-verity root hashes (one file per model,
@@ -159,8 +163,10 @@ func Parse(args []string) (*Config, error) {
 		"CVM image SHA256 digest (env: IMAGE_DIGEST)")
 	fs.StringVar(&cfg.CUDAVersion, "cuda-version", envOr("CUDA_VERSION", "12.6.3"),
 		"CUDA version (env: CUDA_VERSION)")
-	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.28.0"),
+	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.29.0"),
 		"vLLM version (env: VLLM_VERSION)")
+	fs.BoolVar(&cfg.BatchInvariance, "batch-invariance", envOr("VLLM_BATCH_INVARIANT", "0") == "1",
+		"Whether the vLLM engines run batch-invariant kernels; reported in the reproducibility block (env: VLLM_BATCH_INVARIANT, inherited by vLLM)")
 	fs.StringVar(&cfg.TeeType, "tee-type", envOr("TEE_TYPE", "tdx"),
 		"TEE type: tdx or sev-snp (env: TEE_TYPE)")
 	fs.StringVar(&cfg.RoothashDir, "roothash-dir", envOr("ROOTHASH_DIR", "/var/lib/enclave-os/model-roothashes"),

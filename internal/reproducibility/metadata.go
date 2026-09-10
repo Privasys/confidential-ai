@@ -40,12 +40,6 @@ type Metadata struct {
 	// prefilled). A replay is always cache-cold regardless of the serving
 	// mode.
 	KVCacheMode string `json:"kv_cache_mode,omitempty"`
-	// Exclusive records that this generation ran alone on the engine: a
-	// strict request holds the generation gate, so no other request was
-	// batched with it. Without batch-invariant kernels that is the
-	// condition under which the same seed and prompt reproduce the same
-	// tokens (measured 2026-09-10).
-	Exclusive bool `json:"exclusive,omitempty"`
 
 	// CachedTokens is the number of prompt tokens vLLM served from the
 	// prefix cache (usage.prompt_tokens_details.cached_tokens). 0 in
@@ -114,6 +108,7 @@ func NewMetadata(
 	gpu string,
 	imageDigest string,
 	teeType string,
+	batchInvariance bool,
 ) *Metadata {
 	return &Metadata{
 		RequestID:          uuid.New().String(),
@@ -128,13 +123,12 @@ func NewMetadata(
 		CUDAVersion:        cudaVersion,
 		GPU:                gpu,
 		TensorParallelSize: 1,
-		// Honest value: kernel-level batch invariance is NOT enabled (we
-		// run stock vLLM kernels; the upstream VLLM_BATCH_INVARIANT work
-		// is tracked separately). What we guarantee is serialized replay
-		// determinism from the recorded seed + prompt, not bitwise
-		// equality under concurrent batching. This field was previously
-		// hardcoded true, which overstated the contract.
-		BatchInvariance: false,
+		// What the engine actually runs (VLLM_BATCH_INVARIANT, read by
+		// config). True means a request's tokens do not depend on what
+		// else was batched with it, so seed + prompt + clock reproduce a
+		// reply byte for byte under concurrent traffic; false means only
+		// a request that ran alone reproduces (measured 2026-09-10).
+		BatchInvariance: batchInvariance,
 		ImageDigest:        imageDigest,
 		TeeType:            teeType,
 		Timestamp:          time.Now().UTC().Format(time.RFC3339),

@@ -893,12 +893,12 @@ func (e *vllmExitError) Error() string {
 //     (an earlier 2*max_model_len setting halved the achievable
 //     context before that was understood).
 //
-// What none of this guarantees: batch-invariance. With continuous
-// batching, two concurrent requests may see different reductions
-// across the batch dimension. Determinism holds per-request when
-// traffic is serialised; true concurrent determinism needs
-// batch-invariant kernels, which upstream does not yet support for
-// GDN models (vllm#42960).
+// Batch invariance is the engine's, not this argv's: every vLLM this
+// process starts inherits VLLM_BATCH_INVARIANT from the image
+// (Dockerfile.prod), where the GDN path gets it from the patched
+// vllm#45819. With it, a request's tokens do not depend on what else was
+// batched with it; without it, only a request that ran alone reproduces
+// (measured 2026-09-10).
 func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	// Use a short, stable served-model-name. If the caller passed an
 	// absolute filesystem path (e.g. "/models/qwen36-35b-a3b-fp8"),

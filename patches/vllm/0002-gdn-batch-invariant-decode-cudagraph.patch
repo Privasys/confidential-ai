@@ -1,0 +1,19 @@
+--- a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -929,7 +929,15 @@
+                             "VLLM_BATCH_INVARIANT is not supported with "
+                             "speculative decoding on GDN_ATTN."
+                         )
+-                    if _meta.non_spec_query_start_loc is not None:
++                    if _meta.num_prefills == 0:
++                        # Pure decode: every non-spec sequence contributes
++                        # exactly one token, so the cumulative boundaries are
++                        # [0, 1, ..., num_tokens]. Derive them from the token
++                        # count rather than syncing non_spec_query_start_loc to
++                        # the host: a D2H copy is illegal during CUDA graph
++                        # capture, and the trip count must be static anyway.
++                        _bi_cu = list(range(num_tokens + 1))
++                    elif _meta.non_spec_query_start_loc is not None:
+                         _bi_cu = _meta.non_spec_query_start_loc.tolist()
+         if _bi_cu is not None:
+             mixed_qkvz = torch.cat(

@@ -32,7 +32,19 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/privasys/conf
 # (FlashInfer top-k/top-p sampler).
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
-# vLLM v0.28.0 — one release past v0.27.1. What we upgrade FOR: the
+# vLLM v0.29.0 (2026-09-09), one release past v0.28.0. What we upgrade
+# FOR: batch invariance. The GDN batch-invariance PR (vllm#45819) is based
+# on a main commit that v0.29.0 already contains for the GDN file, so its
+# pure-Python diff applies onto this release wheel (see the patch step
+# below); on 0.28.0 the same files had drifted. Release audit 2026-09-10:
+# every `vllm serve` flag buildVLLMArgs emits still exists at this tag
+# (arg_utils.py, cli_args.py, generate/api_router.py); Model Runner V2 is
+# now the default for all models (#53183, merged 2026-08-27, so already in
+# the tree our 2026-09-01 invariance measurements ran on); FlashInfer
+# 0.6.18 (requirements/cuda.txt), torch 2.13.0, cu129 wheels published for
+# both. The v0.28.0 notes below still apply.
+#
+# vLLM v0.28.0 — one release past v0.27.1. What we upgraded FOR: the
 # Qwen3.5/3.6 GDN decode path keeps improving (fused CUDA post-conv MTP
 # decode kernel #51674, GDN gates aligned with speculative tokens
 # #51812) and Mamba prefix caching is now on by DEFAULT (#50991),
@@ -70,7 +82,7 @@ FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip ca-certificates curl \
-    gcc libc6-dev && \
+    gcc libc6-dev patch && \
     rm -rf /var/lib/apt/lists/*
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1
@@ -88,8 +100,36 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu129 \
       --extra-index-url https://flashinfer.ai/whl/ \
-      "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
-      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
+      "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
+
+# Batch invariance for the GDN (Qwen3.5/3.6) path. vLLM's VLLM_BATCH_INVARIANT
+# covers dense attention and the FP8 GEMMs but not GDN linear attention; the
+# open upstream PR vllm#45819 adds it, and it is pure Python, so it is applied
+# onto the release wheel here rather than built from source. Two patches:
+#   0001: the PR itself, taken as the diff from its merge base (29af8bd6, which
+#         is byte-identical to v0.29.0 for the GDN file) to its head c6cb0851.
+#   0002: our decode-path fix the PR has not adopted: under CUDA graph capture
+#         a pure-decode step must not sync non_spec_query_start_loc to the
+#         host (the PR did adopt our pre-registered [0, 1] cu_seqlens buffer).
+# Measured 2026-09-01 on the FP8 35B with graphs: bitwise 12/12 at 1.45x the
+# non-invariant cost (the PR as-is is eager-only, 16x). A patch that no
+# longer applies fails the build: that is the signal to re-base, never a
+# silent skip. Re-audit both when the wheel moves.
+COPY patches/vllm/ /opt/vllm-patches/
+RUN cd /usr/local/lib/python3.12/dist-packages && \
+    for p in /opt/vllm-patches/0001-gdn-batch-invariance-pr45819.patch \
+             /opt/vllm-patches/0002-gdn-batch-invariant-decode-cudagraph.patch; do \
+      patch -p1 --forward --no-backup-if-mismatch < "$p" || exit 1; \
+    done && \
+    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ('vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py','vllm/v1/attention/backends/gdn_attn.py','vllm/model_executor/layers/layernorm.py')]; print('vllm patches applied')" && \
+    grep -q "_bi_cu = list(range(num_tokens + 1))" vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+
+# Every engine this image starts runs batch-invariant: a request's tokens no
+# longer depend on what else vLLM batched with it, so the same seed, prompt
+# and clock reproduce a reply byte for byte under concurrent traffic. The
+# Go proxy reads the same variable for the reproducibility block.
+ENV VLLM_BATCH_INVARIANT=1
 
 # Disable vLLM's unconditional Qwen Triton warmup (still present and
 # still unconditional at 0.28.0 — the assert below is the tripwire)
@@ -122,7 +162,7 @@ PYEOF
 # reproducibility.
 RUN mkdir -p /opt/vllm-templates && \
     curl -fsSL -o /opt/vllm-templates/tool_chat_template_gemma4.jinja \
-      https://raw.githubusercontent.com/vllm-project/vllm/v0.28.0/examples/tool_chat_template_gemma4.jinja
+      https://raw.githubusercontent.com/vllm-project/vllm/v0.29.0/examples/tool_chat_template_gemma4.jinja
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
@@ -147,7 +187,7 @@ ENV MODELS_DIR=/models
 # the wheel. (The running server is always correct — vLLM's
 # system_fingerprint comes from the wheel itself — but our attestation
 # metadata must match it.)
-ENV VLLM_VERSION=0.28.0
+ENV VLLM_VERSION=0.29.0
 ENV CUDA_VERSION=12.6.3
 
 # Disable DeepGEMM FP8 JIT path. vLLM v0.21.0+ ships bundled DeepGEMM

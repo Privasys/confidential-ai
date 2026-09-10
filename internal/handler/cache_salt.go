@@ -38,8 +38,10 @@ import (
 // qwen36-35b-a3b-fp8, the same request (same seed, same dynamic context)
 // served cache-cold, cache-warm (16k cached tokens) and strict gave the
 // same tokens as long as it ran ALONE on the engine; what changed the
-// tokens was another request in the same batch. "strict" therefore also
-// carries the exclusivity request (see genGate in handler.go).
+// tokens was another request in the same batch. Batch-invariant kernels
+// (VLLM_BATCH_INVARIANT, Dockerfile.prod) remove that dependence; "strict"
+// then only buys a cache-cold prefill, which is what a caller who wants
+// the recorded prompt prefilled from scratch asks for.
 const (
 	kvCacheModeSession = "session"
 	kvCacheModeStrict  = "strict"

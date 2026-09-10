@@ -746,13 +746,6 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		defaultSeed := newSeed()
 		reqParams.Seed = &defaultSeed
 	}
-	if reqParams.Temperature == 0 {
-		reqParams.Temperature = 1.0
-	}
-	if reqParams.TopP == 0 {
-		reqParams.TopP = 1.0
-	}
-
 	// Ensure seed is always sent to vLLM for reproducibility
 	reqWithSeed, err := injectSeed(body, *reqParams.Seed)
 	if err != nil {
@@ -760,6 +753,32 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to inject seed")
 		return
 	}
+
+	// Make the effective sampling explicit. A request that omits
+	// temperature / top_p / top_k is sampled by vLLM with the model's
+	// generation_config.json (Qwen3.6: 1.0 / 0.95 / 20), so those values
+	// go into the forwarded body when absent and into the block below —
+	// a replay that pins "what the block said" then samples exactly as the
+	// original did. This handler used to report 1 / 1 / none for such a
+	// request, and every pinned replay of a client that omitted them
+	// diverged from its original on a provably deterministic engine
+	// (2026-09-10).
+	defaults := models.GenerationDefaults{Temperature: 1.0, TopP: 1.0, TopK: -1}
+	if h.fleet != nil {
+		if gen := h.fleet.Generate(); gen != nil {
+			defaults = gen.GenerationDefaults()
+		}
+	}
+	var eff models.GenerationDefaults
+	reqWithSeed, eff, err = injectSamplingDefaults(reqWithSeed, defaults)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to inject sampling defaults")
+		return
+	}
+	reqParams.Temperature = eff.Temperature
+	reqParams.TopP = eff.TopP
+	reqParams.TopK = eff.TopK
 
 	// Inject the per-request dynamic context (wall clock) at the tail of the
 	// last user message (see injectDynamicContext), and record it for
@@ -1468,6 +1487,42 @@ func newSeed() int64 {
 }
 
 // injectSeed ensures the "seed" field is present in the request JSON.
+// injectSamplingDefaults writes temperature, top_p and top_k into the body
+// when the request omitted them, and returns the effective values (what the
+// request carries afterwards). A top_k the client set to 0 is left alone:
+// vLLM reads 0 as "disabled" like -1. A client-supplied value is never
+// overridden.
+func injectSamplingDefaults(body []byte, d models.GenerationDefaults) ([]byte, models.GenerationDefaults, error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, d, err
+	}
+	eff := d
+	if v, ok := m["temperature"]; ok {
+		if f, ok := v.(float64); ok {
+			eff.Temperature = f
+		}
+	} else {
+		m["temperature"] = d.Temperature
+	}
+	if v, ok := m["top_p"]; ok {
+		if f, ok := v.(float64); ok {
+			eff.TopP = f
+		}
+	} else {
+		m["top_p"] = d.TopP
+	}
+	if v, ok := m["top_k"]; ok {
+		if f, ok := v.(float64); ok {
+			eff.TopK = int(f)
+		}
+	} else {
+		m["top_k"] = d.TopK
+	}
+	out, err := json.Marshal(m)
+	return out, eff, err
+}
+
 func injectSeed(body []byte, seed int64) ([]byte, error) {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {

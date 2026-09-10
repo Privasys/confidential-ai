@@ -268,6 +268,9 @@ type Manager struct {
 	// forwardBudget rate-limits the failure lines parseProgress copies
 	// into the container log.
 	forwardBudget forwardBudget
+	// genDefaults are the served model's sampling defaults (gen_config.go),
+	// set when a load reaches ready; nil before the first load.
+	genDefaults *GenerationDefaults
 	// stderrTail is a small ring of the most recent vLLM stderr lines,
 	// kept so a process death can surface the ACTUAL error (argparse
 	// failure, ValueError, OOM traceback) in the status document instead
@@ -830,10 +833,12 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		digest = m.computeDigest(modelPath)
 	}
 
+	genDefaults := loadGenerationDefaults(modelPath)
 	if !m.ifGen(gen, func() {
 		m.state = StateReady
 		m.model = req.Model
 		m.modelDigest = digest
+		m.genDefaults = &genDefaults
 		m.progress = 1.0
 		m.message = "Model loaded and serving"
 	}) {

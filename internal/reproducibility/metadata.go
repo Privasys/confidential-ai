@@ -40,6 +40,12 @@ type Metadata struct {
 	// prefilled). A replay is always cache-cold regardless of the serving
 	// mode.
 	KVCacheMode string `json:"kv_cache_mode,omitempty"`
+	// Exclusive records that this generation ran alone on the engine: a
+	// strict request holds the generation gate, so no other request was
+	// batched with it. Without batch-invariant kernels that is the
+	// condition under which the same seed and prompt reproduce the same
+	// tokens (measured 2026-09-10).
+	Exclusive bool `json:"exclusive,omitempty"`
 
 	// CachedTokens is the number of prompt tokens vLLM served from the
 	// prefix cache (usage.prompt_tokens_details.cached_tokens). 0 in

@@ -43,6 +43,18 @@ type Handler struct {
 	// cache_salt.go). Per-process: the prefix cache dies with the vLLM
 	// engine this proxy supervises, so the key never needs to persist.
 	saltKey []byte
+	// genGate serialises strict-mode generations against every other
+	// generation on this engine. vLLM batches whatever is in flight and
+	// its kernels are not batch-invariant, so a request's tokens depend on
+	// its batch mates: measured 2026-09-10 on qwen36-35b-a3b-fp8, the same
+	// strict request reproduced byte for byte when alone and diverged as
+	// soon as an unrelated request shared the GPU. A strict request
+	// (X-Privasys-Reproducibility: strict) takes the gate exclusively and
+	// holds it until its stream has been relayed; every other generation
+	// takes it shared, so ordinary traffic still batches freely and only
+	// waits while a strict call runs. Embeddings and reranks run on their
+	// own engines and never touch it.
+	genGate sync.RWMutex
 
 	// fleet coordinates the vLLM instances (generate + embed + rerank).
 	// nil in legacy mode (vLLM started by entrypoint.sh, single model).
@@ -419,11 +431,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	// A strict request runs alone on the engine (genGate); everything else
+	// shares. Held until the handler has relayed the whole response.
+	release := h.acquireGenGate(wantsStrictReproducibility(r))
+	defer release()
 	if hasClientTools(body) && !wantsReproducibility(r) {
 		h.proxyPassthrough(w, r, "/v1/chat/completions")
 		return
 	}
 	h.proxyWithReproducibility(w, r, "/v1/chat/completions")
+}
+
+// acquireGenGate takes the generation gate, exclusively for a strict
+// request, and returns its release. A strict caller waits for in-flight
+// generations to finish and keeps new ones out until released; a shared
+// caller only ever waits for a strict one.
+func (h *Handler) acquireGenGate(exclusive bool) func() {
+	if exclusive {
+		h.genGate.Lock()
+		return h.genGate.Unlock
+	}
+	h.genGate.RLock()
+	return h.genGate.RUnlock
 }
 
 // hasClientTools reports whether the request body contains a non-empty
@@ -446,6 +475,8 @@ func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release := h.acquireGenGate(wantsStrictReproducibility(r))
+	defer release()
 	h.proxyWithReproducibility(w, r, "/v1/completions")
 }
 
@@ -858,6 +889,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	)
 	meta.DynamicContext = dynCtx
 	meta.KVCacheMode = kvMode
+	meta.Exclusive = kvMode == kvCacheModeStrict
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {

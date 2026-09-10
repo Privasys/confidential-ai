@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -264,6 +265,9 @@ type Manager struct {
 	// parameter set triggers a reload.
 	appliedReq LoadRequest
 
+	// forwardBudget rate-limits the failure lines parseProgress copies
+	// into the container log.
+	forwardBudget forwardBudget
 	// stderrTail is a small ring of the most recent vLLM stderr lines,
 	// kept so a process death can surface the ACTUAL error (argparse
 	// failure, ValueError, OOM traceback) in the status document instead
@@ -1039,6 +1043,48 @@ func (m *Manager) resolveModelPath(model string) string {
 	return model
 }
 
+// failureLine matches the vLLM stderr lines worth a place in the container
+// log: Python tracebacks and their frames, engine-core deaths, CUDA and
+// out-of-memory errors, kernel kills. Progress bars and INFO chatter never
+// match.
+var failureLine = regexp.MustCompile(`Traceback \(most recent call last\)|^\s*File ".*", line \d+|Error|error:|EngineCore|CUDA|out of memory|OutOfMemory|Killed|Segmentation|core dumped|assert`)
+
+// forwardBudget bounds how many failure lines reach the container log:
+// a burst allowance so a whole traceback (frames included) gets through,
+// refilled slowly so a looping error cannot flood the log FIFO (the
+// blocking-FIFO incident above is why vLLM output is otherwise silent).
+type forwardBudget struct {
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+}
+
+const (
+	forwardBurst      = 200.0 // lines
+	forwardPerSecond  = 2.0   // refill rate
+	forwardInitialAge = time.Hour
+)
+
+func (b *forwardBudget) take() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	if b.last.IsZero() {
+		b.tokens = forwardBurst
+	} else {
+		b.tokens += now.Sub(b.last).Seconds() * forwardPerSecond
+		if b.tokens > forwardBurst {
+			b.tokens = forwardBurst
+		}
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 // parseProgress reads vLLM stderr and extracts loading progress.
 var progressPattern = regexp.MustCompile(`Loading model weights.*?(\d+)%`)
 var shardPattern = regexp.MustCompile(`Loading safetensors.*?(\d+)/(\d+)`)
@@ -1060,6 +1106,16 @@ func (m *Manager) parseProgress(r io.Reader, gen uint64) {
 		// load's dying output must not pollute the successor's ring —
 		// keep DRAINING though, so the dying process never blocks on a
 		// full pipe.
+		// The one exception to the silence above: lines that name a
+		// failure are forwarded to our own stderr, bounded, so an engine
+		// that dies AFTER readiness leaves its cause in the container
+		// log. The ring is only surfaced once the process has exited, and
+		// on 2026-09-10 the API server outlived a dead EngineCore for
+		// long enough that prod showed "ready" with a refused port and no
+		// trace anywhere reachable (the host has no shell).
+		if failureLine.MatchString(line) && m.forwardBudget.take() {
+			log.Printf("[vllm %s] %s", m.task, line)
+		}
 		if !m.ifGen(gen, func() {
 			m.stderrTail = append(m.stderrTail, line)
 			// Keep enough lines to reach past a Python traceback to the actual engine

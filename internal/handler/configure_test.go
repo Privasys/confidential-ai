@@ -9,26 +9,61 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/privasys/confidential-ai/internal/config"
 )
 
+// configureAppID and configureOwnerRole identify the app these tests
+// configure. The role is the canonical hex form the IdP grants.
+const (
+	configureAppID     = "3a545cb7-740e-4d31-839b-7341359631a2"
+	configureOwnerRole = "privasys-platform:app:3a545cb7740e4d31839b7341359631a2:owner"
+)
+
 // newConfigureHandler builds a Handler with billing persistence pointed at a
 // temp file and the reporter loop context started, as main.go does.
-func newConfigureHandler(t *testing.T) (*Handler, string) {
+//
+// It also wires a real verifier and returns a mint function. These tests are
+// about configure SEMANTICS, not auth, but /configure is owner-gated and no
+// longer has an unauthenticated mode to fall through — removing that was the
+// point of the 2026-09-17 LOAD_TOKEN fix. So they now authenticate properly
+// rather than relying on the gate being open.
+func newConfigureHandler(t *testing.T) (*Handler, string, func() string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "billing-config.json")
+	issuer, mint := jwksTestIDP(t)
 	h := New(&config.Config{
 		ModelName:         "test-model",
 		BillingConfigFile: cfgPath,
+		OIDCIssuer:        issuer,
+		OIDCAudience:      "privasys-platform",
+		AppID:             configureAppID,
 	}, nil)
+	h.oidcVerifier = NewOIDCVerifier(issuer, "")
 	h.StartBilling(context.Background())
-	return h, cfgPath
+
+	ownerToken := func() string {
+		return mint(map[string]any{
+			"iss":   issuer,
+			"sub":   "owner-sub",
+			"exp":   float64(time.Now().Add(time.Hour).Unix()),
+			"roles": []string{configureOwnerRole},
+		})
+	}
+	return h, cfgPath, ownerToken
+}
+
+// configureRequest builds an owner-authenticated POST /configure.
+func configureRequest(ownerToken func() string, body string) *http.Request {
+	req := httptest.NewRequest("POST", "/configure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+ownerToken())
+	return req
 }
 
 func TestConfigureEnablesMeteringAndPersists(t *testing.T) {
-	h, cfgPath := newConfigureHandler(t)
+	h, cfgPath, ownerToken := newConfigureHandler(t)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -37,7 +72,7 @@ func TestConfigureEnablesMeteringAndPersists(t *testing.T) {
 	}
 
 	body := `{"billing_account_id":"acct-1","usage_report_url":"https://m/api","usage_report_token":"tok","billing_model":"qwen36-35b-a3b-fp8"}`
-	req := httptest.NewRequest("POST", "/configure", strings.NewReader(body))
+	req := configureRequest(ownerToken, body)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -74,12 +109,12 @@ func TestConfigureEnablesMeteringAndPersists(t *testing.T) {
 }
 
 func TestConfigurePartialIsRejected(t *testing.T) {
-	h, _ := newConfigureHandler(t)
+	h, _, ownerToken := newConfigureHandler(t)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
 	// account without url -> 400, no reporter installed.
-	req := httptest.NewRequest("POST", "/configure", strings.NewReader(`{"billing_account_id":"acct-1"}`))
+	req := configureRequest(ownerToken, `{"billing_account_id":"acct-1"}`)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -91,19 +126,19 @@ func TestConfigurePartialIsRejected(t *testing.T) {
 }
 
 func TestConfigureEmptyDisablesMetering(t *testing.T) {
-	h, _ := newConfigureHandler(t)
+	h, _, ownerToken := newConfigureHandler(t)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
 	// First enable.
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/configure",
-		strings.NewReader(`{"billing_account_id":"a","usage_report_url":"https://m"}`)))
+	mux.ServeHTTP(httptest.NewRecorder(),
+		configureRequest(ownerToken, `{"billing_account_id":"a","usage_report_url":"https://m"}`))
 	if h.billingReporter() == nil {
 		t.Fatal("metering should be enabled")
 	}
 	// Then an empty payload disables.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/configure", strings.NewReader(`{}`)))
+	mux.ServeHTTP(rec, configureRequest(ownerToken, `{}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty configure: expected 200, got %d", rec.Code)
 	}

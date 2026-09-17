@@ -43,13 +43,6 @@ type Config struct {
 	// orchestration. Empty disables the feature.
 	StateFile string
 
-	// LoadToken, when non-empty, is accepted as a Bearer credential on
-	// POST /v1/models/load and POST /v1/models/unload. It is now a LEGACY
-	// FALLBACK for a direct break-glass path: the primary gate is the app's
-	// per-app owner/admin config role (see AppID). When both LoadToken and
-	// OIDCIssuer are empty the endpoints remain open (dev mode).
-	LoadToken string
-
 	// OIDCIssuer is the platform OIDC issuer whose JWKS validates bearer
 	// tokens on privileged endpoints. When non-empty, /v1/models/{load,
 	// unload} require a token from this issuer carrying this app's owner or
@@ -66,7 +59,7 @@ type Config struct {
 	// enclave launcher as PRIVASYS_APP_ID. It builds this app's per-app config
 	// roles so model load/unload is OWNER-gated like every other app's
 	// configure (the configure-authz standard). Empty fails closed on the OIDC
-	// path (only the LoadToken break-glass remains). env: PRIVASYS_APP_ID.
+	// path: no role can match an empty set. env: PRIVASYS_APP_ID.
 	AppID string
 
 	// RevokedSidsURL is the IdP feed of revoked session ids that the proxy
@@ -173,8 +166,6 @@ func Parse(args []string) (*Config, error) {
 		"Directory of per-model dm-verity root hashes (env: ROOTHASH_DIR)")
 	fs.StringVar(&cfg.StateFile, "state-file", envOr("STATE_FILE", "/data/last-load.json"),
 		"Path where the last successful Load request is persisted for auto-restore on restart (env: STATE_FILE; empty disables)")
-	fs.StringVar(&cfg.LoadToken, "load-token", envOr("LOAD_TOKEN", ""),
-		"Legacy break-glass bearer accepted on /v1/models/{load,unload} alongside the app owner/admin role (env: LOAD_TOKEN)")
 	fs.StringVar(&cfg.OIDCIssuer, "oidc-issuer", envOr("OIDC_ISSUER", "https://privasys.id"),
 		"Platform OIDC issuer whose JWKS validates end-user (inference) and owner (load/unload) bearer tokens. Inference authentication is mandatory, so an empty issuer leaves no way to authenticate callers and rejects all inference with 401 (env: OIDC_ISSUER)")
 	fs.StringVar(&cfg.OIDCAudience, "oidc-audience", envOr("OIDC_AUDIENCE", ""),

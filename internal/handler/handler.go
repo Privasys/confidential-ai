@@ -295,15 +295,12 @@ func (h *Handler) requireConfigureAuth(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-// requireLoadAuth gates model load/unload. Authorisation order:
-//
-//  1. When an OIDC verifier is configured (the default), the caller must
-//     present a platform bearer carrying this app's owner or admin config role
-//     (loadRoles) — model load/unload is this app's configure surface and is
-//     owner-gated like every other app's configure (the configure-authz
-//     standard). The owner drives it from the CLI/portal on their own bearer.
-//  2. A non-empty static LoadToken is accepted as a LEGACY break-glass fallback.
-//  3. When neither is configured the endpoint is open (dev mode).
+// requireLoadAuth gates model load/unload. The caller must present a platform
+// bearer carrying this app's owner or admin config role (loadRoles) — model
+// load/unload is this app's configure surface and is owner-gated like every
+// other app's configure (the configure-authz standard). The owner drives it
+// from the CLI/portal on their own bearer. There is no static-token
+// break-glass and no unauthenticated mode; see requireRoleAuth.
 //
 // loadRoles is the set of roles that authorise model load/unload: this app's
 // per-app owner and admin config roles, so load/unload is owner-gated exactly
@@ -336,12 +333,26 @@ func (h *Handler) requireLoadAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requireRoleAuth is the shared gate behind requireLoadAuth and
-// requireConfigureAuth: a verified platform bearer carrying one of roles(),
-// else the legacy static token, else (nothing configured) dev mode.
+// requireConfigureAuth: a verified platform bearer carrying one of roles().
+// There is no other way in.
+//
+// It used to have two more. A non-empty static LoadToken was accepted as a
+// break-glass, and — the part that mattered — when NEITHER a verifier nor a
+// token was configured the endpoint was served with no authentication at all,
+// as "dev mode". That made unauthenticated the state a deployment reached by
+// omission rather than by choice, which is how it was reported on 2026-09-17.
+//
+// Both are gone. The per-app owner/admin role already took precedence over the
+// break-glass on every configured deployment, so nothing that was working
+// through the supported path changes. A deployment with no verifier now
+// refuses these endpoints instead of opening them: an operator who cannot
+// prove they own the app cannot load a model into it.
 func (h *Handler) requireRoleAuth(next http.HandlerFunc, roles func() []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.oidcVerifier == nil && h.cfg.LoadToken == "" {
-			next(w, r) // dev mode: no auth configured
+		if h.oidcVerifier == nil {
+			// Fail closed. Previously this served the request.
+			writeError(w, http.StatusServiceUnavailable,
+				"no OIDC verifier is configured, so ownership of this app cannot be checked")
 			return
 		}
 		authz := r.Header.Get("Authorization")
@@ -351,50 +362,26 @@ func (h *Handler) requireRoleAuth(next http.HandlerFunc, roles func() []string) 
 		}
 		token := strings.TrimPrefix(authz, "Bearer ")
 
-		if h.oidcVerifier != nil {
-			claims, err := h.oidcVerifier.Verify(r.Context(), token)
-			if err == nil {
-				// Model load/unload IS this app's configure surface, so it is
-				// owner-gated like every other app (the configure-authz
-				// standard): the caller's platform bearer carries
-				// <audience>:app:<hex>:owner|admin for THIS app.
-				for _, role := range roles() {
-					if claims.HasRole(role) {
-						next(w, r)
-						return
-					}
-				}
-				writeError(w, http.StatusForbidden, "requires the app owner/admin role for this app")
-				return
-			}
-			// OIDC verification failed: fall back to the legacy static token.
-			if h.cfg.LoadToken != "" && subtleEq(token, h.cfg.LoadToken) {
-				next(w, r)
-				return
-			}
+		claims, err := h.oidcVerifier.Verify(r.Context(), token)
+		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-
-		// Legacy-only path (OIDC disabled, static token configured).
-		if subtleEq(token, h.cfg.LoadToken) {
-			next(w, r)
-			return
+		// Model load/unload IS this app's configure surface, so it is
+		// owner-gated like every other app (the configure-authz standard):
+		// the caller's platform bearer carries
+		// <audience>:app:<hex>:owner|admin for THIS app.
+		//
+		// roles() returns nil when no app id is injected, which fails closed
+		// here because no role can match an empty set.
+		for _, role := range roles() {
+			if claims.HasRole(role) {
+				next(w, r)
+				return
+			}
 		}
-		writeError(w, http.StatusUnauthorized, "invalid token")
+		writeError(w, http.StatusForbidden, "requires the app owner/admin role for this app")
 	}
-}
-
-// subtleEq is a constant-time string comparison.
-func subtleEq(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := 0; i < len(a); i++ {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
 }
 
 // chatCompletions proxies to vLLM /v1/chat/completions and injects

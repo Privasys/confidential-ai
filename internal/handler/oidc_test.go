@@ -143,33 +143,33 @@ func TestRequireLoadAuth_OwnerGated(t *testing.T) {
 	}
 }
 
-func TestRequireLoadAuth_LegacyFallbackAndDevMode(t *testing.T) {
-	// Legacy static token, OIDC disabled.
-	h := &Handler{cfg: &config.Config{LoadToken: "s3cret"}}
+// Replaces TestRequireLoadAuth_LegacyFallbackAndDevMode. Both behaviours it
+// asserted are gone: the static break-glass, and "dev mode" serving the
+// endpoint when nothing was configured. The latter was the 2026-09-17
+// finding, written down as an expectation.
+func TestRequireLoadAuth_NoStaticTokenNoDevMode(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}}
 	called := false
 	gate := h.requireLoadAuth(func(http.ResponseWriter, *http.Request) { called = true })
+
+	// A static bearer no longer opens anything.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/models/load", nil)
 	req.Header.Set("Authorization", "Bearer s3cret")
 	gate(rec, req)
-	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("legacy token rejected: called=%v code=%d", called, rec.Code)
-	}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("POST", "/v1/models/load", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	gate(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong legacy token: code=%d", rec.Code)
+	if called {
+		t.Fatalf("a static token was accepted: code=%d", rec.Code)
 	}
 
-	// Dev mode: nothing configured → open.
-	h = &Handler{cfg: &config.Config{}}
+	// No credential at all, nothing configured: refuse, do not serve.
 	called = false
-	gate = h.requireLoadAuth(func(http.ResponseWriter, *http.Request) { called = true })
-	gate(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/models/load", nil))
-	if !called {
-		t.Fatal("dev mode should allow without auth")
+	rec = httptest.NewRecorder()
+	gate(rec, httptest.NewRequest("POST", "/v1/models/load", nil))
+	if called {
+		t.Fatal("the endpoint was served with no verifier configured; it must fail closed")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (cannot check ownership), got %d", rec.Code)
 	}
 }
 
@@ -347,22 +347,27 @@ func TestAuthorizeInference(t *testing.T) {
 	}
 }
 
-func TestRequireLoadAuth_OIDCConfiguredLegacyFallback(t *testing.T) {
+// Replaces TestRequireLoadAuth_OIDCConfiguredLegacyFallback, which asserted
+// that a non-JWT static token failed OIDC verification and then matched the
+// break-glass. With the break-glass gone, a token that does not verify is
+// simply rejected, even when a verifier IS configured.
+func TestRequireLoadAuth_OIDCConfiguredRejectsUnverifiableToken(t *testing.T) {
 	issuer, _ := jwksTestIDP(t)
 	h := &Handler{
-		cfg:          &config.Config{OIDCIssuer: issuer, AppID: "3a545cb7-740e-4d31-839b-7341359631a2", LoadToken: "s3cret"},
+		cfg:          &config.Config{OIDCIssuer: issuer, AppID: "3a545cb7-740e-4d31-839b-7341359631a2"},
 		oidcVerifier: NewOIDCVerifier(issuer, ""),
 	}
 	called := false
 	gate := h.requireLoadAuth(func(http.ResponseWriter, *http.Request) { called = true })
-	// A non-JWT legacy token fails OIDC verify (malformed) then matches the
-	// static fallback.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/models/load", nil)
 	req.Header.Set("Authorization", "Bearer s3cret")
 	gate(rec, req)
-	if !called || rec.Code != http.StatusOK {
-		t.Fatalf("legacy fallback under OIDC rejected: called=%v code=%d", called, rec.Code)
+	if called {
+		t.Fatal("an unverifiable token reached the handler")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 

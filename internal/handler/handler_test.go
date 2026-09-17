@@ -394,45 +394,34 @@ func TestStreamingErrorPassthrough(t *testing.T) {
 	}
 }
 
-func TestModelsLoadRequiresLoadToken(t *testing.T) {
-	h := New(&config.Config{LoadToken: "s3cret"}, nil)
+// The static break-glass is gone: a bearer that is not a verified platform
+// token carrying this app's owner/admin role does not open model load/unload,
+// whatever its value.
+func TestModelsLoadRejectsStaticToken(t *testing.T) {
+	h := New(&config.Config{}, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	cases := []struct {
-		name       string
-		authz      string
-		wantStatus int
-	}{
-		{"no header", "", http.StatusUnauthorized},
-		{"wrong scheme", "Basic abc", http.StatusUnauthorized},
-		{"wrong token", "Bearer nope", http.StatusUnauthorized},
-		// Correct token reaches the handler; modelMgr is nil so it
-		// short-circuits with 501 NotImplemented. That is fine for
-		// the auth-gate test - it proves the gate let the request
-		// through.
-		{"right token", "Bearer s3cret", http.StatusNotImplemented},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/v1/models/load",
-				strings.NewReader(`{"model":"gemma4"}`))
-			if tc.authz != "" {
-				req.Header.Set("Authorization", tc.authz)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("got %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-		})
+	for _, authz := range []string{"", "Basic abc", "Bearer nope", "Bearer s3cret"} {
+		req := httptest.NewRequest("POST", "/v1/models/load",
+			strings.NewReader(`{"model":"gemma4"}`))
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusNotImplemented {
+			t.Fatalf("authz %q reached the handler; no static token should open this endpoint", authz)
+		}
 	}
 }
 
-func TestModelsLoadOpenWhenNoLoadToken(t *testing.T) {
-	// Empty LoadToken -> auth bypassed (legacy/dev mode).
-	h := New(&config.Config{LoadToken: ""}, nil)
+// This replaces TestModelsLoadOpenWhenNoLoadToken, which asserted the
+// endpoint was SERVED when nothing was configured -- a test that encoded the
+// 2026-09-17 finding as intended behaviour. With no verifier there is no way
+// to establish who owns the app, so the endpoint must refuse rather than open.
+func TestModelsLoadClosedWhenNoVerifier(t *testing.T) {
+	h := New(&config.Config{}, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -441,10 +430,11 @@ func TestModelsLoadOpenWhenNoLoadToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	// modelMgr is nil so we expect 501; the important assertion is
-	// that we did NOT get 401.
-	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("expected auth bypassed, got 401: %s", rec.Body.String())
+	if rec.Code == http.StatusNotImplemented {
+		t.Fatal("model load was served with no verifier configured; it must fail closed")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (cannot check ownership), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

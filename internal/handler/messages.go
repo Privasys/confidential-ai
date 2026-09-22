@@ -50,6 +50,31 @@ var (
 // isMessages reports whether this is the Anthropic wire.
 func (w wire) isMessages() bool { return w.name == wireMessages.name }
 
+// reproEventType names the reproducibility frame on the Messages wire. The
+// Anthropic protocol is a typed-event protocol: its readers refuse a frame
+// whose payload carries no `type` (dsh 0.1.7 throws "SSE event type
+// mismatch" and the whole turn fails), and they ignore a type they do not
+// know. So the block travels as an event of its own rather than as the bare
+// data frame the chat wire uses, where the reader instead drops any frame
+// without `choices`. Vendor-prefixed, because it is not Anthropic's.
+const reproEventType = "privasys_reproducibility"
+
+// reproFrame renders the reproducibility block as one SSE event on this wire.
+func (w wire) reproFrame(meta any) ([]byte, error) {
+	if !w.isMessages() {
+		body, err := json.Marshal(map[string]any{"reproducibility": meta})
+		if err != nil {
+			return nil, err
+		}
+		return []byte("data: " + string(body) + "\n\n"), nil
+	}
+	body, err := json.Marshal(map[string]any{"type": reproEventType, "reproducibility": meta})
+	if err != nil {
+		return nil, err
+	}
+	return []byte("event: " + reproEventType + "\n" + "data: " + string(body) + "\n\n"), nil
+}
+
 // isTerminalEvent reports whether this SSE event ends the stream on this
 // wire. The reproducibility frame is emitted just before it.
 func (w wire) isTerminalEvent(event []byte) bool {

@@ -1029,11 +1029,11 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 		if !wantRepro {
 			return
 		}
-		metaJSON, err := json.Marshal(map[string]any{"reproducibility": meta})
+		frame, err := wr.reproFrame(meta)
 		if err != nil {
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", metaJSON)
+		_, _ = w.Write(frame)
 		flusher.Flush()
 	}
 

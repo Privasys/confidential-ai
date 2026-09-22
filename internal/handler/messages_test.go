@@ -230,3 +230,38 @@ func TestEachWireKnowsItsTerminalEvent(t *testing.T) {
 		t.Error("message_stop must be recognised without its event: line")
 	}
 }
+
+// An Anthropic SSE reader refuses a frame whose payload has no type, so the
+// reproducibility block travels as an event of its own on that wire. dsh
+// 0.1.7 fails the whole turn on an untyped frame.
+func TestReproducibilityFrameIsTypedOnTheMessagesWire(t *testing.T) {
+	frame, err := wireMessages.reproFrame(map[string]any{"seed": 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(frame)
+	if !strings.HasPrefix(text, "event: "+reproEventType+"\n") {
+		t.Fatalf("the frame must name its event: %q", text)
+	}
+	var payload map[string]any
+	data := strings.TrimPrefix(strings.SplitN(text, "\n", 2)[1], "data: ")
+	if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &payload); err != nil {
+		t.Fatalf("payload is not JSON: %v (%q)", err, data)
+	}
+	if payload["type"] != reproEventType {
+		t.Errorf("payload type = %v, want %q: a reader keys off it", payload["type"], reproEventType)
+	}
+	if payload["reproducibility"] == nil {
+		t.Error("the block itself is missing")
+	}
+
+	// The chat wire keeps its bare data frame: its reader drops frames
+	// without choices rather than refusing them.
+	chat, err := wireChat.reproFrame(map[string]any{"seed": 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(chat), "event: ") {
+		t.Errorf("the chat frame must stay as it was: %q", string(chat))
+	}
+}

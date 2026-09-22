@@ -34,6 +34,46 @@
       }
     },
     {
+      "name": "messages",
+      "description": "Send an Anthropic Messages request to the confidential LLM: the same attested model, metering and reproducibility as chat, on the wire Anthropic clients speak. Point a Messages-compatible client at this app host and the reply is generated inside the enclave.",
+      "endpoint": "/v1/messages",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model identifier (e.g. qwen36-35b-a3b-fp8)"
+          },
+          "messages": {
+            "type": "array",
+            "description": "Conversation turns, each {role, content}; content is a string or a list of content blocks",
+            "items": { "type": "object" }
+          },
+          "system": {
+            "type": "string",
+            "description": "System prompt. A top-level field on this wire, not a message."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "description": "Maximum tokens to generate. Required on this wire."
+          },
+          "temperature": {
+            "type": "number",
+            "description": "Sampling temperature"
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed for reproducible output. If omitted, the proxy picks a random seed and returns it in the reproducibility block."
+          },
+          "stream": {
+            "type": "boolean",
+            "description": "Stream the reply as Anthropic SSE events"
+          }
+        },
+        "required": ["model", "messages", "max_tokens"]
+      }
+    },
+    {
       "name": "complete",
       "description": "Send a text completion request to the confidential LLM. Completes a given prompt with reproducible inference metadata.",
       "endpoint": "/v1/completions",

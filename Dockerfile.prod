@@ -106,12 +106,18 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 # Batch invariance for the GDN (Qwen3.5/3.6) path. vLLM's VLLM_BATCH_INVARIANT
 # covers dense attention and the FP8 GEMMs but not GDN linear attention; the
 # open upstream PR vllm#45819 adds it, and it is pure Python, so it is applied
-# onto the release wheel here rather than built from source. Two patches:
+# onto the release wheel here rather than built from source. Three patches:
 #   0001: the PR itself, taken as the diff from its merge base (29af8bd6, which
 #         is byte-identical to v0.29.0 for the GDN file) to its head c6cb0851.
 #   0002: our decode-path fix the PR has not adopted: under CUDA graph capture
 #         a pure-decode step must not sync non_spec_query_start_loc to the
 #         host (the PR did adopt our pre-registered [0, 1] cu_seqlens buffer).
+#   0003: carry `seed` through vLLM's own Anthropic-to-OpenAI converter. The
+#         Messages wire has no seed of its own and the converter builds the
+#         chat request from an explicit field list, so without it a caller on
+#         /v1/messages cannot pin the sampler and the reply is silently not
+#         reproducible. This deployment serves both wires under one
+#         reproducibility contract (internal/handler/messages.go).
 # Measured 2026-09-01 on the FP8 35B with graphs: bitwise 12/12 at 1.45x the
 # non-invariant cost (the PR as-is is eager-only, 16x). A patch that no
 # longer applies fails the build: that is the signal to re-base, never a
@@ -119,10 +125,11 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 COPY patches/vllm/ /opt/vllm-patches/
 RUN cd /usr/local/lib/python3.12/dist-packages && \
     for p in /opt/vllm-patches/0001-gdn-batch-invariance-pr45819.patch \
-             /opt/vllm-patches/0002-gdn-batch-invariant-decode-cudagraph.patch; do \
+             /opt/vllm-patches/0002-gdn-batch-invariant-decode-cudagraph.patch \
+             /opt/vllm-patches/0003-anthropic-messages-seed.patch; do \
       patch -p1 --forward --no-backup-if-mismatch < "$p" || exit 1; \
     done && \
-    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ('vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py','vllm/v1/attention/backends/gdn_attn.py','vllm/model_executor/layers/layernorm.py')]; print('vllm patches applied')" && \
+    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ('vllm/entrypoints/anthropic/protocol.py','vllm/entrypoints/anthropic/serving.py','vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py','vllm/v1/attention/backends/gdn_attn.py','vllm/model_executor/layers/layernorm.py')]; print('vllm patches applied')" && \
     grep -q "_bi_cu = list(range(num_tokens + 1))" vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
 
 # Every engine this image starts runs batch-invariant: a request's tokens no

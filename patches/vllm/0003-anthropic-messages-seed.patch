@@ -1,0 +1,44 @@
+Carry `seed` from an Anthropic Messages request into the converted request.
+
+vLLM's Anthropic endpoint (vllm/entrypoints/anthropic) converts a Messages
+request into a ChatCompletionRequest with an explicit field list, and `seed`
+is not on it: the Anthropic wire has no seed of its own, and the request
+model ignores unknown fields rather than refusing them. A caller on that wire
+therefore cannot pin the sampler, silently — the request succeeds and the
+output is simply not reproducible.
+
+This deployment's whole reproducibility contract rests on a pinned seed (the
+handler injects one when the caller omits it and echoes it in the
+reproducibility block), so the Messages wire needs the same field the
+chat-completions wire has. `seed` joins the request model beside the other
+vLLM-specific fields that are not in the Anthropic spec (`cache_salt`,
+`vllm_xargs`, …) and is passed through the converter.
+
+Pure Python, no behaviour change for a request that omits it.
+
+--- a/vllm/entrypoints/anthropic/protocol.py
++++ b/vllm/entrypoints/anthropic/protocol.py
+@@ -138,6 +138,13 @@
+     top_p: float | None = None
+
+     # vLLM-specific fields that are not in Anthropic spec
++    seed: int | None = Field(
++        default=None,
++        description=(
++            "Random seed for the sampler, as on the OpenAI-compatible "
++            "endpoint. Required to make a response reproducible."
++        ),
++    )
+     cache_salt: str | None = Field(
+         default=None,
+         min_length=1,
+--- a/vllm/entrypoints/anthropic/serving.py
++++ b/vllm/entrypoints/anthropic/serving.py
+@@ -485,6 +485,7 @@
+             temperature=anthropic_request.temperature,
+             top_p=anthropic_request.top_p,
+             top_k=anthropic_request.top_k,
++            seed=anthropic_request.seed,
+             cache_salt=anthropic_request.cache_salt,
+             kv_transfer_params=anthropic_request.kv_transfer_params,
+             ec_transfer_params=anthropic_request.ec_transfer_params,

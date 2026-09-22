@@ -251,6 +251,11 @@ func (h *Handler) NotReadyMessage() string {
 // RegisterRoutes adds all endpoints to the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", h.chatCompletions)
+	// The same model over the Anthropic Messages wire (messages.go): vLLM
+	// serves it, and this proxy adds the same attestation, metering and
+	// reproducibility it adds to chat completions.
+	mux.HandleFunc("POST /v1/messages", h.messages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", h.countTokens)
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("POST /v1/embeddings", h.embeddings)
 	mux.HandleFunc("POST /v1/rerank", h.rerank)
@@ -395,6 +400,14 @@ func (h *Handler) requireRoleAuth(next http.HandlerFunc, roles func() []string) 
 // which is precisely the declaration that it parses the extension (the
 // harness does, and records the block on its egress leg).
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	h.generate(w, r, "/v1/chat/completions", wireChat)
+}
+
+// generate serves one generate request on the given upstream route in the
+// given wire shape (messages.go). Every wire gets the same treatment: the
+// caller is authorised and billed, and the reply is reproducible unless the
+// request carries client tools and asks for nothing.
+func (h *Handler) generate(w http.ResponseWriter, r *http.Request, path string, wr wire) {
 	r, ok := h.authorizeInference(w, r)
 	if !ok {
 		return
@@ -407,10 +420,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if hasClientTools(body) && !wantsReproducibility(r) {
-		h.proxyPassthrough(w, r, "/v1/chat/completions")
+		h.proxyPassthrough(w, r, path, wr)
 		return
 	}
-	h.proxyWithReproducibility(w, r, "/v1/chat/completions")
+	h.proxyWithReproducibility(w, r, path, wr)
 }
 
 // hasClientTools reports whether the request body contains a non-empty
@@ -433,7 +446,8 @@ func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.proxyWithReproducibility(w, r, "/v1/completions")
+	// The legacy completions wire shares the chat shapes.
+	h.proxyWithReproducibility(w, r, "/v1/completions", wireChat)
 }
 
 // embeddings proxies to the fleet's embed instance (/v1/embeddings,
@@ -582,7 +596,7 @@ func extractPoolingUsage(body []byte) (id string, in int64, ok bool) {
 // metadata event. Used for OpenAI-compatible clients that supply
 // their own tools and whose strict stream parsers reject any `data:`
 // frame that is not a `chat.completion.chunk`.
-func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string) {
+func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string, wr wire) {
 	if !h.IsReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
@@ -640,7 +654,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 	if !reqParams.Stream {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
-			if id, in, out, ok := extractUsage(respBody); ok {
+			if id, in, out, ok := wr.usage(respBody); ok {
 				rep.RecordFor(id, callerInfoFromContext(r.Context()), h.generateModelSlug(), in, out)
 			}
 		}
@@ -695,7 +709,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // proxyWithReproducibility reads the request, proxies to vLLM, then
 // wraps the response with reproducibility metadata.
 // Supports both streaming (SSE) and non-streaming responses.
-func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string) {
+func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string, wr wire) {
 	if !h.IsReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
@@ -800,7 +814,12 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	var meter *meterCtx
 	if rep := h.billingReporter(); rep != nil {
 		meter = &meterCtx{reporter: rep, caller: callerInfoFromContext(r.Context()), model: h.generateModelSlug()}
-		if reqParams.Stream {
+		// The chat wire reports no usage on a stream unless asked, and the
+		// synthetic chunk is stripped again unless the client asked itself.
+		// The Messages wire needs neither: vLLM's own converter asks the
+		// engine for usage, and the events that carry it (message_start,
+		// message_delta) are part of that protocol, so they stay.
+		if reqParams.Stream && !wr.isMessages() {
 			clientHadUsage := false
 			reqWithSeed, clientHadUsage = injectStreamUsage(reqWithSeed)
 			meter.suppressUsage = !clientHadUsage
@@ -868,9 +887,9 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
-		h.proxyStream(w, resp, meta, wantRepro, meter)
+		h.proxyStream(w, resp, meta, wantRepro, meter, wr)
 	} else {
-		h.proxyNonStream(w, resp, meta, wantRepro, meter)
+		h.proxyNonStream(w, resp, meta, wantRepro, meter, wr)
 	}
 }
 
@@ -911,7 +930,7 @@ func wantsReproducibility(r *http.Request) bool {
 }
 
 // proxyNonStream handles non-streaming responses: read full body, inject metadata.
-func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx) {
+func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx, wr wire) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MiB limit
 	if err != nil {
 		h.requestsFailed.Add(1)
@@ -929,10 +948,10 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 
 	// Meter token usage from the upstream body (present in every successful
 	// vLLM completion, regardless of the reproducibility opt-in).
-	if id, in, out, ok := extractUsage(respBody); ok {
+	if id, in, out, ok := wr.usage(respBody); ok {
 		meter.record(id, in, out)
 	}
-	meta.CachedTokens = extractCachedTokens(respBody)
+	meta.CachedTokens = wr.cachedTokens(respBody)
 
 	if !wantRepro {
 		// Pass the upstream body through verbatim.
@@ -982,7 +1001,7 @@ func (h *Handler) proxyNonStream(w http.ResponseWriter, resp *http.Response, met
 // We also short-circuit `data: [DONE]` so the metadata event is
 // emitted *before* the sentinel even when vLLM packs both lines into
 // one TCP read.
-func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx) {
+func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *reproducibility.Metadata, wantRepro bool, meter *meterCtx, wr wire) {
 	if resp.StatusCode != http.StatusOK {
 		// Error responses are not streamed; read and pass through.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -1018,6 +1037,9 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 		flusher.Flush()
 	}
 
+	// Token totals of a Messages stream, folded as its events pass.
+	var msgUsage messagesStreamUsage
+
 	// Buffer for accumulating one SSE event (terminated by "\n\n").
 	var event []byte
 	for {
@@ -1032,7 +1054,13 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 				// token totals with an empty choices array. Record it and,
 				// unless the client opted in to include_usage itself, drop
 				// it from the forwarded stream so the response is unchanged.
-				if meter != nil {
+				if wr.isMessages() {
+					// The Messages wire spreads its totals over two events
+					// (message_start, message_delta), so they are folded as
+					// they pass and recorded once at message_stop. Nothing
+					// is stripped: both events are part of that protocol.
+					msgUsage.observe(event)
+				} else if meter != nil {
 					if id, in, out, ok := extractStreamUsage(event); ok {
 						meter.record(id, in, out)
 						// The usage chunk precedes [DONE], and the repro
@@ -1045,7 +1073,13 @@ func (h *Handler) proxyStream(w http.ResponseWriter, resp *http.Response, meta *
 						}
 					}
 				}
-				if isDoneEvent(event) {
+				if wr.isTerminalEvent(event) {
+					if wr.isMessages() {
+						if id, in, out, ok := msgUsage.total(); ok {
+							meter.record(id, in, out)
+							meta.CachedTokens = msgUsage.cached
+						}
+					}
 					emitMeta()
 					_, _ = w.Write(event)
 					flusher.Flush()

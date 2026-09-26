@@ -77,6 +77,24 @@ func callerFromContext(ctx context.Context) string {
 // header, mandatory inference auth 401s every sealed chat turn.
 const relaySubHeader = "X-Privasys-Sub"
 
+// The header every stock Anthropic-style client puts its key in: the Anthropic
+// SDKs, Claude Code, LangChain's Anthropic client, and dsh's own Messages
+// adapter all send x-api-key and none of them send a bearer. Since this app
+// serves /v1/messages it has to read the credential where those clients put
+// it, or a caller with a perfectly good Privasys key is told to authenticate.
+//
+// It is the same credential in a different envelope: same verifier, same
+// revocation set, same subject. It is NOT a new kind of credential.
+//
+// Note for callers on the app-to-app path: a credential presented here is
+// used INSTEAD of the payer the platform vouched for in a spend token (see
+// resolveCaller's ordering), so an app that lets a stray or junk x-api-key
+// through now gets 401 where it used to be served on its verified payer.
+// That is deliberate, a caller sending a bad key should fail loudly, but it
+// makes stripping this header on an app's egress leg a requirement rather
+// than hygiene. The attested harness does it in its egress proxy.
+const apiKeyHeader = "X-Api-Key"
+
 // Ingress mutual RA-TLS peer identity, asserted by the enclave manager after
 // verifying the caller's attested client certificate against this app's
 // allowed-callers policy (enclave-os-virtual internal/manager/peerverify.go).
@@ -117,22 +135,40 @@ func callerInfoFromContext(ctx context.Context) billing.Caller {
 }
 
 // resolveCaller extracts the end-user credential from X-App-Auth (the proxied
-// path, forwarded by the management-service) or the Authorization bearer (a
-// direct OpenAI-SDK client), verifies it against the platform OIDC issuer, and
-// returns its subject. Returns ("", nil) when no credential is present and
-// ("", err) when a credential is present but invalid. A platform API key is just
-// a long-lived signed token, so it verifies through the same path.
+// path, forwarded by the management-service), the Authorization bearer (a
+// direct OpenAI-SDK client) or x-api-key (a direct Anthropic-style client on
+// /v1/messages), verifies it against the platform OIDC issuer, and returns its
+// subject. Returns ("", nil) when no credential is present and ("", err) when a
+// credential is present but invalid. A platform API key is just a long-lived
+// signed token, so all three verify through the same path.
+//
+// Two DIFFERENT tokens in Authorization and x-api-key are refused rather than
+// ranked. Both are client-presented credentials for the same direct-client
+// role, so there is no principled winner, and picking one is how a caller ends
+// up metered as somebody else.
 //
 // Sealed-transport requests carry no token at all; for those the
 // relay-asserted subject (relaySubHeader) is the caller. An explicit token
 // always takes precedence — a caller presenting an invalid or revoked token
 // is rejected, never silently downgraded to the relay identity.
 func (h *Handler) resolveCaller(r *http.Request) (string, error) {
+	var bearer string
+	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
+		bearer = strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+	}
+	apiKey := strings.TrimSpace(r.Header.Get(apiKeyHeader))
+	if bearer != "" && apiKey != "" && bearer != apiKey {
+		return "", errors.New("conflicting credentials")
+	}
+	// X-App-Auth stays ahead of both: on the proxied path it is the
+	// credential the management-service resolved for this call, and a header
+	// the client also happened to send does not displace it.
 	tok := strings.TrimSpace(r.Header.Get("X-App-Auth"))
 	if tok == "" {
-		if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
-			tok = strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
-		}
+		tok = bearer
+	}
+	if tok == "" {
+		tok = apiKey
 	}
 	if tok == "" {
 		// Spend token: the runtime named the paying user (see payerHeader).

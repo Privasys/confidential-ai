@@ -33,7 +33,11 @@ func CORS(allowOrigins string, next http.Handler) http.Handler {
 				if rh := r.Header.Get("Access-Control-Request-Headers"); rh != "" {
 					w.Header().Set("Access-Control-Allow-Headers", rh)
 				} else {
-					w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
+					// x-api-key and anthropic-version are what an Anthropic-style
+					// client sends to /v1/messages; without them in the fallback
+					// a browser preflight that names no headers blocks the call.
+					w.Header().Set("Access-Control-Allow-Headers",
+						"Accept, Authorization, Content-Type, X-Api-Key, Anthropic-Version")
 				}
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}

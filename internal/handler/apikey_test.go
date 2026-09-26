@@ -6,8 +6,10 @@ package handler
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +178,77 @@ func TestApiKeyGoesThroughRevocation(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a revoked credential must be refused in x-api-key too, got %d", rec.Code)
+	}
+}
+
+// A disagreement between X-App-Auth and a client header is REPORTED, not
+// refused: the request is still served on X-App-Auth. The log line is what
+// turns generalising the refusal into a decision made on evidence.
+func TestAppAuthDisagreementIsLoggedNotRefused(t *testing.T) {
+	mux, h, _ := messagesHandler(t, messagesReply)
+	issuer, mint := jwksTestIDP(t)
+	h.oidcVerifier = NewOIDCVerifier(issuer, "")
+	mintFor := func(sub string) string {
+		return mint(map[string]any{"iss": issuer, "sub": sub, "exp": float64(time.Now().Add(time.Hour).Unix())})
+	}
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	send := func() int {
+		req := messagesRequest()
+		req.Header.Set("X-App-Auth", mintFor("resolved-user"))
+		req.Header.Set("X-Api-Key", mintFor("someone-else"))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := send(); code != http.StatusOK {
+		t.Fatalf("a disagreement must still be served on X-App-Auth, got %d", code)
+	}
+	if !strings.Contains(logs.String(), "credential disagreement on /v1/messages") {
+		t.Fatalf("the disagreement was not reported: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "resolved") || !strings.Contains(logs.String(), "someone-") {
+		t.Fatalf("the log line must name both subjects: %q", logs.String())
+	}
+	// No token may appear in the log.
+	for _, tok := range []string{mintFor("resolved-user"), mintFor("someone-else")} {
+		if strings.Contains(logs.String(), tok) {
+			t.Fatal("a credential leaked into the log")
+		}
+	}
+	// Repeated on every request, a misconfigured caller would flood a capped
+	// log and bury the start. The distinct pair is the information.
+	before := strings.Count(logs.String(), "credential disagreement")
+	for i := 0; i < 5; i++ {
+		send()
+	}
+	if after := strings.Count(logs.String(), "credential disagreement"); after != before {
+		t.Fatalf("expected one line per distinct pair, got %d then %d", before, after)
+	}
+}
+
+// The same credential in X-App-Auth and a client header is one person in two
+// envelopes, and must not be reported as a disagreement.
+func TestSameSubjectAcrossAppAuthAndClientIsQuiet(t *testing.T) {
+	mux, h, _ := messagesHandler(t, messagesReply)
+	issuer, mint := jwksTestIDP(t)
+	h.oidcVerifier = NewOIDCVerifier(issuer, "")
+	claims := map[string]any{"iss": issuer, "sub": "one-user", "exp": float64(time.Now().Add(time.Hour).Unix())}
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	req := messagesRequest()
+	req.Header.Set("X-App-Auth", mint(claims))
+	req.Header.Set("X-Api-Key", mint(claims)) // same subject, distinct token bytes
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(logs.String(), "credential disagreement") {
+		t.Fatalf("one subject in two envelopes is not a disagreement: %q", logs.String())
 	}
 }

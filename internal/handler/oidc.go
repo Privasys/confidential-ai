@@ -164,6 +164,17 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 	// credential the management-service resolved for this call, and a header
 	// the client also happened to send does not displace it.
 	tok := strings.TrimSpace(r.Header.Get("X-App-Auth"))
+	// A disagreement HERE is reported, not refused. X-App-Auth and a client
+	// header are different roles, so unlike the pair above there is a
+	// principled winner and no need to fail. But nobody has shown whether the
+	// proxied path ever forwards a client credential alongside the one it
+	// resolved, so refusing could turn working traffic into 401s on a guess.
+	// One line per distinct pair says whether it happens at all, and after
+	// that the rule can be generalised on evidence instead (Bertrand,
+	// 2026-09-26).
+	if client := firstNonEmpty(bearer, apiKey); tok != "" && client != "" && tok != client {
+		h.noteCredentialDisagreement(r, tok, client)
+	}
 	if tok == "" {
 		tok = bearer
 	}
@@ -210,6 +221,67 @@ func (h *Handler) resolveCaller(r *http.Request) (string, error) {
 		return "", errors.New("credential revoked")
 	}
 	return claims.Subject, nil
+}
+
+// firstNonEmpty returns the first non-empty argument, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// subjectForLog names a token's subject for a log line, following the house
+// convention of a truncated subject rather than the whole pseudonymous id. It
+// never returns any part of the token itself.
+func (h *Handler) subjectForLog(r *http.Request, tok string) string {
+	if h.oidcVerifier == nil {
+		return "unverified"
+	}
+	claims, err := h.oidcVerifier.Verify(r.Context(), tok)
+	if err != nil {
+		return "invalid"
+	}
+	return claims.Subject
+}
+
+// noteCredentialDisagreement reports, once per distinct pair and route, that a
+// request carried BOTH the credential the proxied path resolved (X-App-Auth)
+// and a client-presented one naming somebody else. The request is served on
+// X-App-Auth regardless; this only answers whether the case occurs in
+// production, so that refusing it later is a decision made on evidence.
+//
+// Deduplicated because a misconfigured caller would otherwise repeat this on
+// every request, and the admin container-logs view is capped: a flood loses
+// the beginning, which is exactly the part that says when it started. The
+// distinct pairs are what carry the information; the repetitions do not.
+func (h *Handler) noteCredentialDisagreement(r *http.Request, appAuth, client string) {
+	appSub := h.subjectForLog(r, appAuth)
+	clientSub := h.subjectForLog(r, client)
+	if appSub == clientSub {
+		return // one person, two envelopes: nothing to report
+	}
+	route := r.URL.Path
+	key := appSub + "\x00" + clientSub + "\x00" + route
+
+	h.credDisagreements.Lock()
+	if h.credDisagreements.seen == nil {
+		h.credDisagreements.seen = map[string]struct{}{}
+	}
+	_, already := h.credDisagreements.seen[key]
+	// Bounded: past the cap we have long since learned that it happens, and
+	// an unbounded map keyed by caller input is a memory leak.
+	if !already && len(h.credDisagreements.seen) < 64 {
+		h.credDisagreements.seen[key] = struct{}{}
+	}
+	h.credDisagreements.Unlock()
+	if already {
+		return
+	}
+	log.Printf("[auth] credential disagreement on %s: X-App-Auth names %.8s…, client header names %.8s… — serving X-App-Auth",
+		route, appSub, clientSub)
 }
 
 // authorizeInference resolves the end-user on an inference request and rejects

@@ -59,6 +59,14 @@ type Handler struct {
 	// without a per-request callout).
 	revoked *revokedSet
 
+	// credDisagreements records the X-App-Auth-versus-client-header
+	// disagreements already reported, so a misconfigured caller cannot
+	// flood the log (see noteCredentialDisagreement).
+	credDisagreements struct {
+		sync.Mutex
+		seen map[string]struct{}
+	}
+
 	// billing meters completed inference and gates requests at zero
 	// balance (the pricing model). Held behind an atomic pointer
 	// because POST /configure can swap the live Reporter at runtime

@@ -1,0 +1,19 @@
+# Checks that every contributor to a pull request has accepted the Privasys
+# Contributor Licence Agreement. The logic lives in Privasys/cla.
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    uses: Privasys/cla/.github/workflows/check.yml@v1
+    secrets:
+      signatures-token: ${{ secrets.CLA_SIGNATURES_TOKEN }}

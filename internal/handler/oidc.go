@@ -118,6 +118,9 @@ const (
 	payerHeader    = "X-Privasys-Peer-Payer"
 	payerAppHeader = "X-Privasys-Peer-Payer-App"
 	payerSIDHeader = "X-Privasys-Peer-Payer-Sid"
+	// payerLedgerHeader is the spend token's ledger handle, forwarded by the
+	// runtime: what the platform bills by, naming no one.
+	payerLedgerHeader = "X-Privasys-Peer-Payer-Ledger"
 )
 
 // payerCtxKey carries the spender app and consent session behind a
@@ -319,9 +322,10 @@ func (h *Handler) authorizeInference(w http.ResponseWriter, r *http.Request) (*h
 	ctx := context.WithValue(r.Context(), callerCtxKey{}, sub)
 	if strings.TrimSpace(r.Header.Get(payerHeader)) == sub {
 		ctx = context.WithValue(ctx, payerCtxKey{}, billing.Caller{
-			Sub: sub,
-			App: strings.ToLower(strings.TrimSpace(r.Header.Get(payerAppHeader))),
-			SID: strings.TrimSpace(r.Header.Get(payerSIDHeader)),
+			Sub:    sub,
+			App:    strings.ToLower(strings.TrimSpace(r.Header.Get(payerAppHeader))),
+			SID:    strings.TrimSpace(r.Header.Get(payerSIDHeader)),
+			Ledger: strings.TrimSpace(r.Header.Get(payerLedgerHeader)),
 		})
 	}
 	r = r.WithContext(ctx)

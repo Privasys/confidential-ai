@@ -62,6 +62,9 @@ type Caller struct {
 	Sub string
 	App string // undashed hex app id (spend-token azp), or ""
 	SID string // consent session, or ""
+	// Ledger is the spend token's ledger handle: how the platform bills the
+	// caller without a subject, or "".
+	Ledger string
 }
 
 // reportRequest is the JSON body posted to the AI-usage endpoint. It mirrors
@@ -75,6 +78,9 @@ type reportRequest struct {
 type reportRequestLn struct {
 	RequestID string `json:"request_id"`
 	CallerSub string `json:"caller_sub,omitempty"`
+	// CallerLedger is the spend token's ledger handle; the platform debits
+	// by it and ignores caller_sub when it is present.
+	CallerLedger string `json:"caller_ledger,omitempty"`
 	// PayerApp / SID: the spender app and consent session behind a
 	// spend-token caller (see Caller).
 	PayerApp string `json:"payer_app,omitempty"`
@@ -234,6 +240,7 @@ func (r *Reporter) send(ctx context.Context, batch []usage) {
 		body.Requests = append(body.Requests, reportRequestLn{
 			RequestID:    u.RequestID,
 			CallerSub:    u.Caller.Sub,
+			CallerLedger: u.Caller.Ledger,
 			PayerApp:     u.Caller.App,
 			SID:          u.Caller.SID,
 			Model:        u.Model,

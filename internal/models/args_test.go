@@ -96,6 +96,22 @@ func TestBuildVLLMArgs_CudagraphMode(t *testing.T) {
 	}
 }
 
+func TestBuildVLLMArgs_LoadThreads(t *testing.T) {
+	base := LoadRequest{Model: "m", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
+
+	if got := flagValue(buildVLLMArgs(base, "/models/m", 8000), "--model-loader-extra-config"); got != `{"enable_multithread_load": true, "num_threads": 8}` {
+		t.Errorf("default: got %q, want 8 threads", got)
+	}
+	base.LoadThreads = 16
+	if got := flagValue(buildVLLMArgs(base, "/models/m", 8000), "--model-loader-extra-config"); got != `{"enable_multithread_load": true, "num_threads": 16}` {
+		t.Errorf("explicit: got %q, want 16 threads", got)
+	}
+	base.LoadThreads = -1
+	if args := buildVLLMArgs(base, "/models/m", 8000); slices.Contains(args, "--model-loader-extra-config") {
+		t.Errorf("negative must keep the single-threaded reader: %v", args)
+	}
+}
+
 func TestBuildVLLMArgs_OmitsTuningFlagsByDefault(t *testing.T) {
 	req := LoadRequest{Model: "m", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.90}
 	args := buildVLLMArgs(req, "/models/m", 8000)

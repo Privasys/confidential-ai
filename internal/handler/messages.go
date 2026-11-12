@@ -111,7 +111,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 // block; it is forwarded so a Messages client can size a prompt before
 // sending it.
 func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
-	if !h.IsReady() {
+	if !h.generateReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}

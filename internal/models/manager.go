@@ -163,6 +163,16 @@ type LoadRequest struct {
 	// will never admit only burns VRAM. 0 means vLLM default.
 	MaxCudagraphCaptureSize int `json:"max_cudagraph_capture_size,omitempty"`
 
+	// LoadThreads is how many threads read the safetensors shards
+	// (`--model-loader-extra-config` enable_multithread_load). 0 means 8,
+	// the multithread loader's own default; a negative value keeps vLLM's
+	// single-threaded reader. A cold read of the 35B FP8 shards took 142 s
+	// single-threaded at Imperial (2026-11-05) against 38 s from the page
+	// cache, so the read, not the copy to the GPU, sets the pace. Which
+	// thread reads which shard changes no weight, so this is not part of
+	// the attested config.
+	LoadThreads int `json:"load_threads,omitempty"`
+
 	// HFOverrides is a JSON object passed verbatim to `--hf-overrides`.
 	// Auto-filled for known model families (the Qwen3 reranker must be
 	// served as sequence classification: architectures
@@ -1082,6 +1092,14 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 	if req.MaxCudagraphCaptureSize > 0 {
 		args = append(args, "--max-cudagraph-capture-size", fmt.Sprintf("%d", req.MaxCudagraphCaptureSize))
+	}
+	if req.LoadThreads >= 0 {
+		threads := req.LoadThreads
+		if threads == 0 {
+			threads = 8
+		}
+		args = append(args, "--model-loader-extra-config",
+			fmt.Sprintf(`{"enable_multithread_load": true, "num_threads": %d}`, threads))
 	}
 	if req.CudagraphMode != "" {
 		args = append(args, "--compilation-config",

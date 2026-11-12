@@ -235,6 +235,18 @@ func (h *Handler) IsReady() bool {
 	return h.ready.Load() == 1
 }
 
+// generateReady reports whether the generate instance is serving. The
+// generation routes need only that model: the fleet loads the pooling
+// instances after it (about 1 min 45 s more at Imperial), and their own
+// routes check their own instance, so chat need not wait for them.
+// IsReady stays the aggregate for /readiness and the status document.
+func (h *Handler) generateReady() bool {
+	if h.fleet != nil {
+		return h.fleet.TaskReady(models.TaskGenerate)
+	}
+	return h.ready.Load() == 1
+}
+
 // NotReadyMessage describes WHY inference is unavailable. The historic
 // catch-all "Model is loading" was actively misleading when the
 // manager was idle (no load ever requested) or a load had failed. In
@@ -605,7 +617,7 @@ func extractPoolingUsage(body []byte) (id string, in int64, ok bool) {
 // their own tools and whose strict stream parsers reject any `data:`
 // frame that is not a `chat.completion.chunk`.
 func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string, wr wire) {
-	if !h.IsReady() {
+	if !h.generateReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
@@ -707,7 +719,7 @@ func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path 
 
 // models proxies the /v1/models endpoint directly.
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
-	if !h.IsReady() {
+	if !h.generateReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}
@@ -718,7 +730,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // wraps the response with reproducibility metadata.
 // Supports both streaming (SSE) and non-streaming responses.
 func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Request, path string, wr wire) {
-	if !h.IsReady() {
+	if !h.generateReady() {
 		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
 		return
 	}

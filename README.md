@@ -43,7 +43,7 @@ vLLM listens on loopback only; every request goes through the proxy. The proxy:
 
 Chat, Messages, completions and `/v1/models` answer as soon as the chat model is up; embeddings and rerank wait for their own model. `/readiness` stays 503 until all of them are loaded.
 
-**Callers** present a Privasys ID access token as `Authorization: Bearer` (or `x-api-key`, so Anthropic SDKs work unchanged). Requests relayed by the platform's sealed transport and calls from attested Privasys apps over mutual RA-TLS are identified by the platform instead. A caller without a funded Privasys account gets `402`.
+**Callers** reach the proxy only through the platform: attested apps over mutual RA-TLS (identified by app id), and people over the sealed transport (identified by their Privasys ID subject), which is also how `privasys apps call` reaches it. The proxy also accepts a Privasys ID access token as `Authorization: Bearer` or `x-api-key`, the headers OpenAI and Anthropic clients send. A caller without a funded Privasys account gets `402`.
 
 ## Reproducibility
 

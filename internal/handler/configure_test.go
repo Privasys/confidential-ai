@@ -30,6 +30,12 @@ const (
 // point of the 2026-09-17 LOAD_TOKEN fix. So they now authenticate properly
 // rather than relying on the gate being open.
 func newConfigureHandler(t *testing.T) (*Handler, string, func() string) {
+	return newConfigureHandlerUpstream(t, "")
+}
+
+// newConfigureHandlerUpstream is newConfigureHandler with a vLLM upstream.
+// The upstream is set before New, which starts a goroutine reading it.
+func newConfigureHandlerUpstream(t *testing.T, upstream string) (*Handler, string, func() string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "billing-config.json")
@@ -40,6 +46,7 @@ func newConfigureHandler(t *testing.T) (*Handler, string, func() string) {
 		OIDCIssuer:        issuer,
 		OIDCAudience:      "privasys-platform",
 		AppID:             configureAppID,
+		VLLMUpstream:      upstream,
 	}, nil)
 	h.oidcVerifier = NewOIDCVerifier(issuer, "")
 	h.StartBilling(context.Background())

@@ -476,8 +476,7 @@ func TestStreamedClientToolsAreMeteredAndSalted(t *testing.T) {
 	}))
 	defer ledger.Close()
 
-	h, _, ownerToken := newConfigureHandler(t)
-	h.cfg.VLLMUpstream = vllm.URL
+	h, _, ownerToken := newConfigureHandlerUpstream(t, vllm.URL)
 	h.ready.Store(1)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)

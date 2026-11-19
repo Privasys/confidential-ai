@@ -58,6 +58,7 @@ func main() {
 	// persisted on the encrypted volume by a previous POST /configure so
 	// metering survives a restart.
 	h.StartBilling(ctx)
+	h.StartDigestStamper(ctx)
 	h.RestorePersistedBilling()
 
 	logJSON("info", "confidential-ai server starting", map[string]string{

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -438,24 +440,90 @@ func TestModelsLoadClosedWhenNoVerifier(t *testing.T) {
 	}
 }
 
-func TestHasClientTools(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"no tools", `{"model":"x","messages":[]}`, false},
-		{"empty tools", `{"model":"x","tools":[]}`, false},
-		{"with tools", `{"model":"x","tools":[{"type":"function","function":{"name":"list_directory"}}]}`, true},
-		{"invalid json", `not json`, false},
+// A streamed request with client tools and no reproducibility header (any
+// stock OpenAI agent: Zed, an SDK tool loop) was once sent down a raw
+// pass-through that never metered it and never salted its prefix cache.
+// It must be metered and salted like every other request, and still reach
+// the client as the stock stream: no usage chunk it did not ask for, no
+// reproducibility frame.
+func TestStreamedClientToolsAreMeteredAndSalted(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		upstream []byte
+		reports  []string
+	)
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		upstream = b
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"id":"chatcmpl-t","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"local_bash","arguments":"{}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"id":"chatcmpl-t","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer vllm.Close()
+	ledger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/billable-caller") {
+			fmt.Fprint(w, `{"billable":true}`)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		reports = append(reports, string(b))
+		mu.Unlock()
+		fmt.Fprint(w, `{}`)
+	}))
+	defer ledger.Close()
+
+	h, _, ownerToken := newConfigureHandler(t)
+	h.cfg.VLLMUpstream = vllm.URL
+	h.ready.Store(1)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, configureRequest(ownerToken,
+		`{"billing_account_id":"acct-1","usage_report_url":"`+ledger.URL+`/ai-usage","usage_report_token":"tok"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configure: %d %s", rec.Code, rec.Body.String())
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := hasClientTools([]byte(c.body)); got != c.want {
-				t.Fatalf("hasClientTools(%q) = %v, want %v", c.body, got, c.want)
-			}
-		})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
+		`{"model":"m","stream":true,"messages":[{"role":"user","content":"ls"}],`+
+			`"tools":[{"type":"function","function":{"name":"local_bash","parameters":{"type":"object"}}}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ownerToken())
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
+
+	got := rec.Body.String()
+	if !strings.Contains(got, `"tool_calls"`) || !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("tool-call stream not forwarded:\n%s", got)
+	}
+	if strings.Contains(got, `"usage"`) || strings.Contains(got, "reproducibility") {
+		t.Fatalf("client must see the stock stream (no usage chunk, no repro frame):\n%s", got)
+	}
+	mu.Lock()
+	sent := string(upstream)
+	mu.Unlock()
+	if !strings.Contains(sent, `"cache_salt"`) {
+		t.Fatalf("upstream request carries no cache_salt: %s", sent)
+	}
+
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		joined := strings.Join(reports, "\n")
+		mu.Unlock()
+		if strings.Contains(joined, `"input_tokens":7`) && strings.Contains(joined, `"output_tokens":3`) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("usage 7/3 was never reported; reports: %v", reports)
 }
 
 func TestChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T) {
@@ -527,12 +595,11 @@ func TestStreamingChatCompletionsOmitsReproducibilityWithoutHeader(t *testing.T)
 	}
 }
 
-// A caller that supplies CLIENT-side tools normally gets the strict
-// pass-through (generic OpenAI clients reject the trailing repro frame) —
-// but the X-Privasys-Reproducibility opt-in declares the caller parses the
-// extension, so it must win over the tools heuristic. Found live 2026-08-27:
-// the attested harness (client-side tools + opt-in) silently lost its
-// repro block.
+// A caller that supplies CLIENT-side tools gets the reproducibility frame
+// only when it opts in with X-Privasys-Reproducibility; without the header
+// the stream stays stock, since generic OpenAI clients reject the frame.
+// Found live 2026-08-27: the attested harness (client-side tools + opt-in)
+// silently lost its repro block.
 func TestChatCompletionsClientToolsReproOptIn(t *testing.T) {
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -576,6 +643,6 @@ func TestChatCompletionsClientToolsReproOptIn(t *testing.T) {
 		t.Errorf("opt-in + client tools must carry the repro frame, got: %s", got)
 	}
 	if got := run(false); strings.Contains(got, `"reproducibility"`) {
-		t.Errorf("no opt-in must stay a strict pass-through, got: %s", got)
+		t.Errorf("no opt-in must stay the stock stream, got: %s", got)
 	}
 }

@@ -7,8 +7,6 @@ package models
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -248,6 +246,7 @@ type Manager struct {
 	state        State
 	model        string
 	modelDigest  string
+	modelFiles   []ManifestEntry // the files the digest covers (digest.go)
 	quantization string
 	progress     float64
 	message      string
@@ -371,6 +370,14 @@ func (m *Manager) ModelDigest() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.modelDigest
+}
+
+// ModelFiles returns the manifest the digest covers, or nil for a model
+// attested by its dm-verity root hash alone.
+func (m *Manager) ModelFiles() []ManifestEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelFiles
 }
 
 // Quantization returns the current quantization setting.
@@ -520,6 +527,7 @@ func (m *Manager) Load(req LoadRequest) error {
 	m.quantization = req.Quantization
 	m.appliedReq = req
 	m.modelDigest = ""
+	m.modelFiles = nil
 	m.progress = 0
 	m.message = "Starting vLLM..."
 	m.loadStart = time.Now()
@@ -610,6 +618,7 @@ func (m *Manager) Unload() error {
 	m.state = StateIdle
 	m.model = ""
 	m.modelDigest = ""
+	m.modelFiles = nil
 	m.quantization = ""
 	m.progress = 0
 	m.message = ""
@@ -838,16 +847,40 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// roothash filename is keyed off the loader id (Source or Model),
 	// not the served name, because that is what the disk-mounter
 	// actually mounts.
+	// Otherwise the digest is the manifest of every file vLLM read
+	// (digest.go), from the directory it actually read them from: a
+	// Hugging Face model lives in the cache under vLLM's HOME, not this
+	// process's. A file whose content does not match its recorded hash
+	// fails the load: those are not the weights the model claims to be.
+	modelDir := resolveModelDir(modelPath)
 	digest := m.lookupVerityRoothash(loaderID)
+	var files []ManifestEntry
+	if digest == "" && modelDir != "" {
+		m.ifGen(gen, func() { m.message = "Hashing model files" })
+		entries, err := modelManifest(modelDir)
+		if err != nil {
+			m.setFailed(gen, "model digest: "+err.Error())
+			if pgid, perr := syscall.Getpgid(cmd.Process.Pid); perr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = cmd.Process.Kill()
+			}
+			<-waitCh
+			return
+		}
+		files = entries
+		digest = manifestDigest(entries)
+	}
 	if digest == "" {
-		digest = m.computeDigest(modelPath)
+		log.Printf("[models] %s: no digest for %q (model files not found)", m.task, loaderID)
 	}
 
-	genDefaults := loadGenerationDefaults(modelPath)
+	genDefaults := loadGenerationDefaults(modelDir)
 	if !m.ifGen(gen, func() {
 		m.state = StateReady
 		m.model = req.Model
 		m.modelDigest = digest
+		m.modelFiles = files
 		m.genDefaults = &genDefaults
 		m.progress = 1.0
 		m.message = "Model loaded and serving"
@@ -1371,56 +1404,6 @@ func (m *Manager) lookupVerityRoothash(model string) string {
 		}
 	}
 	return hash
-}
-
-// computeDigest computes a SHA-256 digest from the model's identity file.
-func (m *Manager) computeDigest(modelPath string) string {
-	// Resolve HuggingFace cache path if needed.
-	resolvedPath := m.resolveHFCachePath(modelPath)
-
-	candidates := []string{
-		filepath.Join(resolvedPath, "model.safetensors.index.json"),
-		filepath.Join(resolvedPath, ".sha256"),
-		filepath.Join(resolvedPath, "config.json"),
-	}
-
-	for _, path := range candidates {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if strings.HasSuffix(path, ".sha256") {
-			// Pre-computed digest file.
-			return strings.TrimSpace(string(data))
-		}
-		h := sha256.Sum256(data)
-		return hex.EncodeToString(h[:])
-	}
-	return ""
-}
-
-// resolveHFCachePath resolves a HuggingFace model name to its cache snapshot path.
-func (m *Manager) resolveHFCachePath(modelPath string) string {
-	if info, err := os.Stat(modelPath); err == nil && info.IsDir() {
-		return modelPath
-	}
-
-	// Try HuggingFace cache structure.
-	home, _ := os.UserHomeDir()
-	hfHome := os.Getenv("HF_HOME")
-	if hfHome == "" {
-		hfHome = filepath.Join(home, ".cache", "huggingface")
-	}
-	repo := "models--" + strings.ReplaceAll(modelPath, "/", "--")
-	snapDir := filepath.Join(hfHome, "hub", repo, "snapshots")
-
-	entries, err := os.ReadDir(snapDir)
-	if err != nil || len(entries) == 0 {
-		return modelPath
-	}
-
-	// Return the last (most recent) snapshot.
-	return filepath.Join(snapDir, entries[len(entries)-1].Name())
 }
 
 // stderrTailSuffix returns a ": <reason>" suffix built from the most

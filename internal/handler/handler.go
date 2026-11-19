@@ -409,55 +409,30 @@ func (h *Handler) requireRoleAuth(next http.HandlerFunc, roles func() []string) 
 	}
 }
 
-// chatCompletions proxies to vLLM /v1/chat/completions and injects
-// reproducibility metadata into the response.
-//
-// Tools are always the CLIENT's: this app dispatches nothing. A caller
-// that sends its own `tools` (Zed, the attested harness) expects the raw
-// OpenAI SSE with `tool_calls` deltas, and a strict client rejects any
-// non-chat-chunk `data:` frame, so such a request gets the plain
-// pass-through UNLESS the caller opted in with X-Privasys-Reproducibility,
-// which is precisely the declaration that it parses the extension (the
-// harness does, and records the block on its egress leg).
+// chatCompletions proxies to vLLM /v1/chat/completions.
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	h.generate(w, r, "/v1/chat/completions", wireChat)
 }
 
 // generate serves one generate request on the given upstream route in the
-// given wire shape (messages.go). Every wire gets the same treatment: the
-// caller is authorised and billed, and the reply is reproducible unless the
-// request carries client tools and asks for nothing.
+// given wire shape (messages.go). Every request, with or without client
+// tools, streamed or not, takes the same path: the caller is authorised and
+// metered, the prefix cache is salted to the caller, and the seed, sampling
+// and clock are pinned. Only the reproducibility record is optional: without
+// X-Privasys-Reproducibility the response is the stock OpenAI or Anthropic
+// one, so strict clients (Zed rejects any `data:` frame that is not a chat
+// chunk) see nothing they do not expect. Tools are always the client's: this
+// app dispatches nothing.
+//
+// An earlier version sent tool-carrying requests without the header down a
+// raw pass-through, which skipped the cache salt and, when streamed, the
+// metering.
 func (h *Handler) generate(w http.ResponseWriter, r *http.Request, path string, wr wire) {
 	r, ok := h.authorizeInference(w, r)
 	if !ok {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	if hasClientTools(body) && !wantsReproducibility(r) {
-		h.proxyPassthrough(w, r, path, wr)
-		return
-	}
 	h.proxyWithReproducibility(w, r, path, wr)
-}
-
-// hasClientTools reports whether the request body contains a non-empty
-// `tools` array, indicating the caller is supplying client-side tools
-// and expects vendor-standard OpenAI tool_call streaming (no server-
-// side dispatch).
-func hasClientTools(body []byte) bool {
-	var probe struct {
-		Tools []json.RawMessage `json:"tools"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return false
-	}
-	return len(probe.Tools) > 0
 }
 
 // completions proxies to vLLM /v1/completions with reproducibility.
@@ -609,112 +584,6 @@ func extractPoolingUsage(body []byte) (id string, in int64, ok bool) {
 		in = e.Usage.TotalTokens
 	}
 	return e.ID, in, in > 0
-}
-
-// proxyPassthrough forwards the request to vLLM and streams the
-// response back verbatim, WITHOUT injecting the reproducibility
-// metadata event. Used for OpenAI-compatible clients that supply
-// their own tools and whose strict stream parsers reject any `data:`
-// frame that is not a `chat.completion.chunk`.
-func (h *Handler) proxyPassthrough(w http.ResponseWriter, r *http.Request, path string, wr wire) {
-	if !h.generateReady() {
-		writeError(w, http.StatusServiceUnavailable, h.NotReadyMessage())
-		return
-	}
-	// Balance gate (the pricing model): refuse inference at zero balance
-	// on the tool-carrying path too, so it can't be used to bypass billing.
-	if h.billingReporter().Frozen() {
-		writeError(w, http.StatusPaymentRequired, "Account is out of credit. Add credit to continue.")
-		return
-	}
-	h.requestsTotal.Add(1)
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	// Inject a random seed default (echoed back) so unseeded requests stay
-	// replayable while still varying naturally on the pass-through path.
-	var reqParams requestParams
-	if err := json.Unmarshal(body, &reqParams); err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadRequest, "invalid JSON request body")
-		return
-	}
-	seed := newSeed()
-	if reqParams.Seed != nil {
-		seed = *reqParams.Seed
-	}
-	reqWithSeed, err := injectSeed(body, seed)
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusInternalServerError, "failed to inject seed")
-		return
-	}
-
-	upstream := h.cfg.VLLMUpstream + path
-	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream, bytes.NewReader(reqWithSeed))
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadGateway, "failed to create upstream request")
-		return
-	}
-	proxyReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := h.client.Do(proxyReq)
-	if err != nil {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("vLLM upstream error: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	if !reqParams.Stream {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
-		if rep := h.billingReporter(); resp.StatusCode == http.StatusOK && rep != nil {
-			if id, in, out, ok := wr.usage(respBody); ok {
-				rep.RecordFor(id, callerInfoFromContext(r.Context()), h.generateModelSlug(), in, out)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		h.requestsFailed.Add(1)
-		writeError(w, http.StatusInternalServerError, "streaming not supported")
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	buf := make([]byte, 32*1024)
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			flusher.Flush()
-		}
-		if rerr != nil {
-			return
-		}
-	}
 }
 
 // models proxies the /v1/models endpoint directly.
@@ -1444,6 +1313,10 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 		Model  string `json:"model"`
 		Digest string `json:"digest,omitempty"`
 		State  string `json:"state"`
+		// Files is the manifest the digest is the SHA-256 of, in sha256sum
+		// order: a client checks each file against the publisher's hash and
+		// recomputes the digest without trusting this enclave.
+		Files []models.ManifestEntry `json:"files,omitempty"`
 	}
 	doc := map[string]any{
 		"image_digest": h.cfg.ImageDigest,
@@ -1471,6 +1344,7 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 				Model:  s.Model,
 				Digest: s.ModelDigest,
 				State:  string(s.State),
+				Files:  h.fleet.Instance(task).ModelFiles(),
 			})
 		}
 	} else if h.cfg.ModelName != "" {

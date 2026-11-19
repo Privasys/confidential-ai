@@ -1261,6 +1261,18 @@ func (h *Handler) attestationExtensions(w http.ResponseWriter, _ *http.Request) 
 	}
 	var exts []entry
 
+	// Inside an enclave the digest is PUSHED to the manager (stamp.go), which
+	// writes it into the hostname's extension file. The RA-TLS module merges
+	// that file with this endpoint's answer at every mint without removing
+	// duplicates, and a certificate carrying one OID twice cannot be minted:
+	// every handshake for the app then fails (prod outage 2026-11-19 15:43).
+	// So when the push path is configured this endpoint declares nothing.
+	if digestStamperConfigured() {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]\n"))
+		return
+	}
+
 	// Use the generate instance's dynamic model digest if available, else
 	// fall back to config. OID 3.5 stays the CHAT model's digest — the
 	// historic single-model semantics verifiers rely on; the pooling

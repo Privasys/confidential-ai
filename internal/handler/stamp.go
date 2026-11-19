@@ -31,6 +31,15 @@ import (
 // oidModelDigest is MODEL_DIGEST, in the app-defined 5.4 sub-arc.
 const oidModelDigest = "1.3.6.1.4.1.65230.5.4.5"
 
+// digestStamperConfigured reports whether the push path is available, in
+// which case /.well-known/attestation-extensions must not declare the same
+// OID (see attestationExtensions).
+func digestStamperConfigured() bool {
+	return os.Getenv("PRIVASYS_MANAGER_URL") != "" &&
+		os.Getenv("PRIVASYS_CONTAINER_NAME") != "" &&
+		os.Getenv("PRIVASYS_CONTAINER_TOKEN") != ""
+}
+
 // StartDigestStamper publishes the chat model's digest to the enclave
 // manager each time it changes, until ctx ends. A no-op outside an enclave
 // (no manager URL or container credentials in the environment).

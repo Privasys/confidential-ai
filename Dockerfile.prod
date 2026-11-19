@@ -87,9 +87,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 
-# flashinfer-cubin (a hard dep of flashinfer-python >= 0.6.14) is not on
-# PyPI; vLLM's own requirements/cuda.txt resolves it from the FlashInfer
-# wheel index, so we must pass the same extra index here.
+# flashinfer-cubin (a hard dependency of vLLM's FlashInfer stack) is not on
+# PyPI. It is pinned below by its exact release URL, like the jit-cache,
+# rather than through FlashInfer's wheel index as an extra index: uv asks an
+# extra index about EVERY package it resolves, so each outage of that index
+# (two 503s on 2026-11-19, for packages it does not even host) failed the
+# whole image build.
 #
 # flashinfer-jit-cache ships the PRE-COMPILED kernel variants that
 # flashinfer would otherwise nvcc-JIT at first inference (~66 .cu files,
@@ -99,8 +102,8 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 # requirements) so the kernel set is part of the image digest.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu129 \
-      --extra-index-url https://flashinfer.ai/whl/ \
       "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_cubin-0.6.18-py3-none-any.whl" \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu129-cp39-abi3-manylinux_2_28_x86_64.whl"
 
 # Batch invariance for the GDN (Qwen3.5/3.6) path. vLLM's VLLM_BATCH_INVARIANT

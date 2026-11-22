@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -160,6 +161,19 @@ type LoadRequest struct {
 	// deployments — capturing graphs for batch sizes the scheduler
 	// will never admit only burns VRAM. 0 means vLLM default.
 	MaxCudagraphCaptureSize int `json:"max_cudagraph_capture_size,omitempty"`
+
+	// KVOffloadingSizeGB gives the prefix cache a CPU tier of this many GiB
+	// (`--kv-offloading-size`): KV blocks evicted from the GPU are kept in
+	// the guest's RAM and copied back on a later hit instead of being
+	// recomputed. It runs vLLM's simple CPU offload connector
+	// (VLLM_USE_SIMPLE_KV_OFFLOAD=1), which keeps the blocks in an
+	// anonymous private mapping (not /dev/shm, which a container caps at
+	// 64 MiB) and moves them only with DMA copies, never with a kernel that
+	// reads host memory directly, which a GPU in confidential-computing
+	// mode cannot do. Blocks keep the GPU cache's salted hashes, so the
+	// per-caller isolation is unchanged, and the copy is byte for byte.
+	// Needs EnablePrefixCaching. 0 means off.
+	KVOffloadingSizeGB float64 `json:"kv_offloading_size_gb,omitempty"`
 
 	// LoadThreads is how many threads read the safetensors shards
 	// (`--model-loader-extra-config` enable_multithread_load). 0 means 8,
@@ -734,6 +748,11 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	if info, statErr := os.Stat("/data"); statErr == nil && info.IsDir() {
 		cmd.Env = append(cmd.Env, "HOME=/data")
 	}
+	// The CPU tier (see KVOffloadingSizeGB) uses the simple connector: an
+	// anonymous mapping and DMA copies only.
+	if req.KVOffloadingSizeGB > 0 && req.EnablePrefixCaching {
+		cmd.Env = append(cmd.Env, "VLLM_USE_SIMPLE_KV_OFFLOAD=1")
+	}
 	// Put vLLM + every worker it spawns in their own process group so
 	// Unload() can SIGKILL the whole tree at once via `kill -- -pgid`.
 	// Without this, vLLM EngineCore / ray workers survive Process.Kill
@@ -1125,6 +1144,9 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 	}
 	if req.MaxCudagraphCaptureSize > 0 {
 		args = append(args, "--max-cudagraph-capture-size", fmt.Sprintf("%d", req.MaxCudagraphCaptureSize))
+	}
+	if req.KVOffloadingSizeGB > 0 && req.EnablePrefixCaching {
+		args = append(args, "--kv-offloading-size", strconv.FormatFloat(req.KVOffloadingSizeGB, 'f', -1, 64))
 	}
 	if req.LoadThreads >= 0 {
 		threads := req.LoadThreads

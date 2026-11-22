@@ -241,3 +241,23 @@ func TestBuildVLLMArgs_LanguageModelOnly(t *testing.T) {
 		t.Fatalf("non-generate tasks must not carry the flag: %v", args)
 	}
 }
+
+func TestBuildVLLMArgs_KVOffloadingNeedsPrefixCaching(t *testing.T) {
+	base := LoadRequest{Model: "m", Dtype: "auto", MaxModelLen: 8192, GPUMemoryUtilization: 0.9, KVOffloadingSizeGB: 48}
+
+	off := buildVLLMArgs(base, "/models/m", 8000)
+	if slices.Contains(off, "--kv-offloading-size") {
+		t.Fatalf("a CPU tier without prefix caching must not be requested: %v", off)
+	}
+
+	on := base
+	on.EnablePrefixCaching = true
+	if got := flagValue(buildVLLMArgs(on, "/models/m", 8000), "--kv-offloading-size"); got != "48" {
+		t.Fatalf("--kv-offloading-size: got %q, want 48", got)
+	}
+
+	on.KVOffloadingSizeGB = 0
+	if slices.Contains(buildVLLMArgs(on, "/models/m", 8000), "--kv-offloading-size") {
+		t.Fatal("0 GiB must leave offloading off")
+	}
+}

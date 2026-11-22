@@ -228,6 +228,7 @@ RUN mkdir -p /opt/vllm-templates && \
 
 COPY --from=builder /confidential-ai /usr/local/bin/confidential-ai
 COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
+COPY scripts/watermark_detect.py /opt/confidential-ai/watermark_detect.py
 RUN chmod +x /opt/confidential-ai/entrypoint.sh
 
 # Model disks: GCP persistent disks are auto-mounted at /mnt/model-* by

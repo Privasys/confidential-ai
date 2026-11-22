@@ -276,6 +276,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// reproducibility it adds to chat completions.
 	mux.HandleFunc("POST /v1/messages", h.messages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", h.countTokens)
+	mux.HandleFunc("POST /v1/watermark/detect", h.watermarkDetect)
 	mux.HandleFunc("POST /v1/completions", h.completions)
 	mux.HandleFunc("POST /v1/embeddings", h.embeddings)
 	mux.HandleFunc("POST /v1/rerank", h.rerank)
@@ -674,6 +675,19 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	reqParams.TopP = eff.TopP
 	reqParams.TopK = eff.TopK
 
+	// The instance watermark is opt-in per request (models/watermark.go).
+	var wantMark bool
+	reqWithSeed, wantMark, err = optInWatermarking(reqWithSeed)
+	if err != nil {
+		h.requestsFailed.Add(1)
+		writeError(w, http.StatusInternalServerError, "failed to set watermarking")
+		return
+	}
+	markID := ""
+	if wantMark && reqParams.Temperature > 0 && h.fleet != nil && h.fleet.Generate() != nil {
+		markID = h.fleet.Generate().WatermarkKeyID()
+	}
+
 	// Inject the per-request dynamic context (wall clock) at the tail of the
 	// last user message (see injectDynamicContext), and record it for
 	// reproducible replay. Tail placement keeps the system prompt and the
@@ -785,6 +799,7 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	)
 	meta.DynamicContext = dynCtx
 	meta.KVCacheMode = kvMode
+	meta.Watermark = markID
 
 	wantRepro := wantsReproducibility(r)
 	if reqParams.Stream {
@@ -1344,6 +1359,9 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 		// Revision is the Hugging Face commit whose full file set the digest
 		// covers (empty for a model that is not a hub snapshot).
 		Revision string `json:"revision,omitempty"`
+		// Watermark is the id of the instance watermark key the model
+		// serves with, when it has one (never the key itself).
+		Watermark string `json:"watermark,omitempty"`
 	}
 	doc := map[string]any{
 		"image_digest": h.cfg.ImageDigest,
@@ -1367,12 +1385,13 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 				continue
 			}
 			served = append(served, servedModel{
-				Task:     string(task),
-				Model:    s.Model,
-				Digest:   s.ModelDigest,
-				State:    string(s.State),
-				Files:    h.fleet.Instance(task).ModelFiles(),
-				Revision: h.fleet.Instance(task).ModelRevision(),
+				Task:      string(task),
+				Model:     s.Model,
+				Digest:    s.ModelDigest,
+				State:     string(s.State),
+				Files:     h.fleet.Instance(task).ModelFiles(),
+				Revision:  h.fleet.Instance(task).ModelRevision(),
+				Watermark: h.fleet.Instance(task).WatermarkKeyID(),
 			})
 		}
 	} else if h.cfg.ModelName != "" {
@@ -1503,6 +1522,25 @@ func injectSamplingDefaults(body []byte, d models.GenerationDefaults) ([]byte, m
 	}
 	out, err := json.Marshal(m)
 	return out, eff, err
+}
+
+// optInWatermarking makes the instance watermark opt-in: vLLM marks a
+// request that does not set `watermarking` whenever the engine has a key,
+// so the field is filled with false when the caller left it out. A caller
+// that sends true keeps it. Returns whether the caller asked for the mark.
+func optInWatermarking(body []byte) ([]byte, bool, error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, false, err
+	}
+	v, ok := m["watermarking"]
+	if !ok || v == nil {
+		m["watermarking"] = false
+		out, err := json.Marshal(m)
+		return out, false, err
+	}
+	want, _ := v.(bool)
+	return body, want, nil
 }
 
 func injectSeed(body []byte, seed int64) ([]byte, error) {

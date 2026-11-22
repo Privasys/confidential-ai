@@ -50,6 +50,13 @@ type Metadata struct {
 	// invariance ships. Nil when the upstream did not report the detail.
 	CachedTokens *int64 `json:"cached_tokens,omitempty"`
 
+	// Watermark is the id of the instance watermark key this response was
+	// marked with, when the caller asked for the mark (watermarking=true)
+	// on an instance serving with one and the sampling could carry it
+	// (temperature > 0). Empty when the response is unmarked. A replay must
+	// ask for the mark too to reproduce the same tokens.
+	Watermark string `json:"watermark,omitempty"`
+
 	// The block once carried dependency_set_fold and tool_calls, stamped by
 	// the agent loop that ran tools from this enclave. That loop now lives
 	// in the Privasys Harness, which records its own tool calls on its

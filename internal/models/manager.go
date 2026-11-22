@@ -175,6 +175,12 @@ type LoadRequest struct {
 	// Needs EnablePrefixCaching. 0 means off.
 	KVOffloadingSizeGB float64 `json:"kv_offloading_size_gb,omitempty"`
 
+	// Watermark turns on the instance's text watermark for the chat model
+	// (see watermark.go): the engine starts with the instance key, a
+	// request that asks for it (watermarking=true) is marked, and
+	// /v1/watermark/detect scores a text against the key. Generate only.
+	Watermark bool `json:"watermark,omitempty"`
+
 	// LoadThreads is how many threads read the safetensors shards
 	// (`--model-loader-extra-config` enable_multithread_load). 0 means 8,
 	// the multithread loader's own default; a negative value keeps vLLM's
@@ -262,6 +268,7 @@ type Manager struct {
 	modelDigest  string
 	modelFiles   []ManifestEntry // the files the digest covers (digest.go)
 	modelRev     string          // the Hugging Face commit the snapshot holds, if any
+	watermarkID  string          // instance watermark key id while serving with one (watermark.go)
 	quantization string
 	progress     float64
 	message      string
@@ -401,6 +408,14 @@ func (m *Manager) ModelRevision() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.modelRev
+}
+
+// WatermarkKeyID returns the id of the instance watermark key while the
+// model serves with it, or "" when it serves without a watermark.
+func (m *Manager) WatermarkKeyID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.watermarkID
 }
 
 // Quantization returns the current quantization setting.
@@ -552,6 +567,7 @@ func (m *Manager) Load(req LoadRequest) error {
 	m.modelDigest = ""
 	m.modelFiles = nil
 	m.modelRev = ""
+	m.watermarkID = ""
 	m.progress = 0
 	m.message = "Starting vLLM..."
 	m.loadStart = time.Now()
@@ -644,6 +660,7 @@ func (m *Manager) Unload() error {
 	m.modelDigest = ""
 	m.modelFiles = nil
 	m.modelRev = ""
+	m.watermarkID = ""
 	m.quantization = ""
 	m.progress = 0
 	m.message = ""
@@ -727,6 +744,19 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	}
 
 	args := buildVLLMArgs(req, modelPath, m.vllmPort)
+
+	// Instance watermark (watermark.go). The key goes on the engine's
+	// command line, so every engine output line is redacted of it below.
+	watermarkID, redact := "", ""
+	if req.Watermark && m.task == TaskGenerate {
+		key, err := instanceWatermarkKey()
+		if err != nil {
+			m.setFailed(gen, "watermark key: "+err.Error())
+			return
+		}
+		args = append(args, "--watermark-config", watermarkConfigArg(key))
+		watermarkID, redact = watermarkKeyID(key), strconv.FormatUint(key, 10)
+	}
 
 	cmd := exec.CommandContext(ctx, "vllm", args...)
 	cmd.Env = append(os.Environ(),
@@ -831,8 +861,8 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// appends to the shared ring under m.mu, so two scanners are safe;
 	// both carry gen so a superseded load's dying output never pollutes
 	// the successor's tail/progress.
-	go m.parseProgress(stderr, gen)
-	go m.parseProgress(stdout, gen)
+	go m.parseProgress(stderr, gen, redact)
+	go m.parseProgress(stdout, gen, redact)
 
 	// Single owner of cmd.Wait: every consumer below reads waitCh, so the
 	// exit status is observed exactly once and the readiness loop can
@@ -919,6 +949,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		m.modelDigest = digest
 		m.modelFiles = files
 		m.modelRev = snapshotRevision(modelDir)
+		m.watermarkID = watermarkID
 		m.genDefaults = &genDefaults
 		m.progress = 1.0
 		m.message = "Model loaded and serving"
@@ -926,6 +957,17 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		// Superseded while becoming ready: Unload already killed the
 		// process group; do not persist the dead configuration.
 		return
+	}
+
+	// The detection helper lives as long as this load (ctx).
+	if watermarkID != "" {
+		tokDir := modelDir
+		if tokDir == "" {
+			tokDir = modelPath
+		}
+		if err := startWatermarkDetector(ctx, tokDir); err != nil {
+			log.Printf("[watermark] detector not started: %v", err)
+		}
 	}
 
 	// Persist the successful load so a container restart auto-recovers.
@@ -1272,10 +1314,13 @@ func (b *forwardBudget) take() bool {
 var progressPattern = regexp.MustCompile(`Loading model weights.*?(\d+)%`)
 var shardPattern = regexp.MustCompile(`Loading safetensors.*?(\d+)/(\d+)`)
 
-func (m *Manager) parseProgress(r io.Reader, gen uint64) {
+func (m *Manager) parseProgress(r io.Reader, gen uint64, redact string) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		line := scanner.Text()
+		// The watermark key is on the engine's command line and vLLM
+		// echoes its non-default arguments: nothing below (the tail ring,
+		// the forwarded failure lines) may ever see it.
+		line := redactWatermarkKey(scanner.Text(), redact)
 		// Deliberately NOT re-emitted to our own stdout/stderr: those are
 		// the container's log FIFOs, and the 35B floods tens of MB at
 		// startup. If the host-side drain ever stalls, the FIFO fills and

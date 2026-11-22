@@ -57,8 +57,8 @@ Send `X-Privasys-Reproducibility: 1` (or `strict`, which also gives the request 
     "temperature": 0.7, "top_p": 0.8, "top_k": 20, "max_tokens": 1024,
     "model": "qwen36-35b-a3b-fp8",
     "quantization": "fp8",
-    "vllm_version": "0.29.0",
-    "cuda_version": "12.6.3",
+    "vllm_version": "0.34.0",
+    "cuda_version": "13.0.3",
     "gpu": "H100-80GB",
     "tensor_parallel_size": 1,
     "batch_invariance": true,
@@ -93,7 +93,7 @@ go test ./...
 docker build -f Dockerfile.prod -t confidential-ai .
 ```
 
-The image (vLLM 0.29 with CUDA 12.6, the proxy, and the batch-invariance patches in `patches/vllm/`) is built by CI on every push to `main` and published as `ghcr.io/privasys/confidential-ai`. It runs as an app on [Enclave OS Virtual](https://github.com/Privasys/enclave-os-virtual), which provides the attested TLS, the encrypted volume and the GPU in confidential-computing mode.
+The image (vLLM 0.34 with CUDA 13.0, the proxy, and the batch-invariance patches in `patches/vllm/`) is built by CI on every push to `main` and published as `ghcr.io/privasys/confidential-ai`. It runs as an app on [Enclave OS Virtual](https://github.com/Privasys/enclave-os-virtual), which provides the attested TLS, the encrypted volume and the GPU in confidential-computing mode.
 
 Documentation: [docs.privasys.org/technology/confidential-ai](https://docs.privasys.org/technology/confidential-ai/overview).
 

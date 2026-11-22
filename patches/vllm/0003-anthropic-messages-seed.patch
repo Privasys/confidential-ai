@@ -18,9 +18,9 @@ Pure Python, no behaviour change for a request that omits it.
 
 --- a/vllm/entrypoints/anthropic/protocol.py
 +++ b/vllm/entrypoints/anthropic/protocol.py
-@@ -138,6 +138,13 @@
+@@ -287,6 +287,13 @@
      top_p: float | None = None
-
+ 
      # vLLM-specific fields that are not in Anthropic spec
 +    seed: int | None = Field(
 +        default=None,
@@ -29,16 +29,16 @@ Pure Python, no behaviour change for a request that omits it.
 +            "endpoint. Required to make a response reproducible."
 +        ),
 +    )
-     cache_salt: str | None = Field(
-         default=None,
-         min_length=1,
+     mm_payload: MMPayload = Field(
+         default="tensors",
+         description=(
 --- a/vllm/entrypoints/anthropic/serving.py
 +++ b/vllm/entrypoints/anthropic/serving.py
-@@ -485,6 +485,7 @@
+@@ -723,6 +723,7 @@
              temperature=anthropic_request.temperature,
              top_p=anthropic_request.top_p,
              top_k=anthropic_request.top_k,
 +            seed=anthropic_request.seed,
+             min_tokens=anthropic_request.min_tokens,
+             watermarking=anthropic_request.watermarking,
              cache_salt=anthropic_request.cache_salt,
-             kv_transfer_params=anthropic_request.kv_transfer_params,
-             ec_transfer_params=anthropic_request.ec_transfer_params,

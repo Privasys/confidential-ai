@@ -91,8 +91,8 @@ if [[ -n "$MODELS_DIR" && -d "$MODELS_DIR" ]]; then
     --roothash-dir "${ROOTHASH_DIR:-/var/lib/enclave-os/model-roothashes}" \
     --gpu-type "${GPU_TYPE:-H100-80GB}" \
     --tee-type "${TEE_TYPE:-tdx}" \
-    --cuda-version "${CUDA_VERSION:-12.6.3}" \
-    --vllm-version "${VLLM_VERSION:-0.29.0}" \
+    --cuda-version "${CUDA_VERSION:-13.0.3}" \
+    --vllm-version "${VLLM_VERSION:-0.34.0}" \
     --image-digest "${IMAGE_DIGEST:-}"
 fi
 

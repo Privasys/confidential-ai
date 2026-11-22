@@ -154,9 +154,9 @@ func Parse(args []string) (*Config, error) {
 		"GPU hardware type (env: GPU_TYPE)")
 	fs.StringVar(&cfg.ImageDigest, "image-digest", envOr("IMAGE_DIGEST", ""),
 		"CVM image SHA256 digest (env: IMAGE_DIGEST)")
-	fs.StringVar(&cfg.CUDAVersion, "cuda-version", envOr("CUDA_VERSION", "12.6.3"),
+	fs.StringVar(&cfg.CUDAVersion, "cuda-version", envOr("CUDA_VERSION", "13.0.3"),
 		"CUDA version (env: CUDA_VERSION)")
-	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.29.0"),
+	fs.StringVar(&cfg.VLLMVersion, "vllm-version", envOr("VLLM_VERSION", "0.34.0"),
 		"vLLM version (env: VLLM_VERSION)")
 	fs.BoolVar(&cfg.BatchInvariance, "batch-invariance", envOr("VLLM_BATCH_INVARIANT", "0") == "1",
 		"Whether the vLLM engines run batch-invariant kernels; reported in the reproducibility block (env: VLLM_BATCH_INVARIANT, inherited by vLLM)")

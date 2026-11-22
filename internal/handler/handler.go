@@ -704,6 +704,14 @@ func (h *Handler) proxyWithReproducibility(w http.ResponseWriter, r *http.Reques
 	// stream_options.include_usage so the upstream emits a final usage
 	// chunk; we record it and (unless the client opted in itself) strip it
 	// from the forwarded stream so the response shape is unchanged.
+	if wr.isMessages() {
+		if reqWithSeed, err = budgetlessThinkingToAdaptive(reqWithSeed); err != nil {
+			h.requestsFailed.Add(1)
+			writeError(w, http.StatusInternalServerError, "failed to read thinking")
+			return
+		}
+	}
+
 	var meter *meterCtx
 	if rep := h.billingReporter(); rep != nil {
 		meter = &meterCtx{reporter: rep, caller: callerInfoFromContext(r.Context()), model: h.generateModelSlug()}

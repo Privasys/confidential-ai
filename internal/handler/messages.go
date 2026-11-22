@@ -5,6 +5,7 @@ package handler
 
 import (
 	"bytes"
+	"io"
 	"encoding/json"
 	"net/http"
 )
@@ -118,6 +119,17 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.authorizeInference(w, r); !ok {
 		return
 	}
+	// Same schema as /v1/messages, so the same budget-less thinking shim.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request")
+		return
+	}
+	if fixed, err := budgetlessThinkingToAdaptive(body); err == nil {
+		body = fixed
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
 	h.proxyDirect(w, r, "/v1/messages/count_tokens")
 }
 
@@ -286,4 +298,29 @@ func isMessagesTerminalEvent(event []byte) bool {
 		}
 	}
 	return false
+}
+
+// budgetlessThinkingToAdaptive keeps `thinking: {"type": "enabled"}` without
+// a budget working on the Messages wire. That is the DeepSeek request shape
+// (no budget field at all), which the DeepSeek Harness sends; vLLM accepted
+// it until 0.34, whose Anthropic schema requires budget_tokens >= 1024 for
+// "enabled" and refuses the request with a 400. "adaptive" is what such a
+// request always meant here: thinking on, no budget pinned (vLLM maps
+// "enabled" to a thinking-token budget and "adaptive" to nothing), so the
+// request is rewritten to it. A request that carries a budget is untouched.
+func budgetlessThinkingToAdaptive(body []byte) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	t, ok := m["thinking"].(map[string]any)
+	if !ok || t["type"] != "enabled" {
+		return body, nil
+	}
+	if b, has := t["budget_tokens"]; has && b != nil {
+		return body, nil
+	}
+	t["type"] = "adaptive"
+	delete(t, "budget_tokens")
+	return json.Marshal(m)
 }

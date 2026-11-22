@@ -284,6 +284,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/models", h.models)
 	mux.HandleFunc("POST /v1/models/load", h.requireLoadAuth(h.modelsLoad))
 	mux.HandleFunc("GET /v1/models/status", h.modelsStatus)
+	// POST too: the platform call path (privasys apps call) always POSTs.
+	mux.HandleFunc("POST /v1/models/status", h.modelsStatus)
 	mux.HandleFunc("POST /v1/models/unload", h.requireLoadAuth(h.modelsUnload))
 	mux.HandleFunc("GET /readiness", h.readiness)
 	mux.HandleFunc("GET /health", h.health)

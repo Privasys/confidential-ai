@@ -245,6 +245,12 @@ type Status struct {
 	// earlier line, so an owner debugging a failed load needs the whole tail —
 	// production enclaves have no shell or journal to read it any other way.
 	StderrTail []string `json:"stderr_tail,omitempty"`
+
+	// Request is the effective load request this instance serves or is
+	// loading (after family recipes and defaults), so an operator can
+	// re-issue the same set with one setting changed. It carries no secret:
+	// the watermark key never enters it.
+	Request *LoadRequest `json:"request,omitempty"`
 }
 
 // Manager manages one vLLM subprocess lifecycle (one task, one port).
@@ -348,6 +354,10 @@ func (m *Manager) Status() Status {
 		Task:        m.task,
 		Model:       m.model,
 		ModelDigest: m.modelDigest,
+	}
+	if m.appliedReq.Model != "" && (m.state == StateReady || m.state == StateLoading) {
+		req := m.appliedReq
+		s.Request = &req
 	}
 
 	switch m.state {

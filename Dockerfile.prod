@@ -120,11 +120,21 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 # v0.34.0: the default wheel is the CUDA 13 build, paired with the cu130
 # PyTorch backend and FlashInfer 0.7.3 (vLLM's requirements/cuda.txt pins
 # flashinfer-python==0.7.3, so the cubin and jit-cache wheels match it).
+#
+# From 0.7.x the jit-cache is a 4 KB wrapper whose requirements pull one
+# provider wheel per GPU generation (sm80, sm89, sm90a, sm100a, sm103a,
+# sm120f), none of them on PyPI. Providers register through the
+# "flashinfer.jit_cache.providers" entry point, so the wrapper plus the H100
+# provider (sm90a) is complete for this image; both go in with --no-deps in
+# a second step, which keeps the five other generations' kernels out.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu130 \
       "https://github.com/vllm-project/vllm/releases/download/v0.34.0/vllm-0.34.0-cp38-abi3-manylinux_2_28_x86_64.whl" \
-      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.3/flashinfer_cubin-0.7.3-py3-none-any.whl" \
-      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.3/flashinfer_jit_cache-0.7.3+cu130-cp39-abi3-manylinux_2_28_x86_64.whl"
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.3/flashinfer_cubin-0.7.3-py3-none-any.whl" && \
+    uv pip install --system --no-deps \
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.3/flashinfer_jit_cache-0.7.3+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" \
+      "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.3/flashinfer_jit_cache_sm90a-0.7.3+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" && \
+    python3 -c "import flashinfer_jit_cache as j; p=j.get_jit_cache_providers(); assert any('sm90a' in x.cuda_architectures for x in p), p; print('flashinfer jit-cache providers:', [x.provider_id for x in p])"
 
 # Batch invariance for the GDN (Qwen3.5/3.6) path. vLLM's VLLM_BATCH_INVARIANT
 # covers dense attention and the FP8 GEMMs but not GDN linear attention; the

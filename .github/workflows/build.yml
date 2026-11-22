@@ -97,6 +97,11 @@ jobs:
           tags: ghcr.io/${{ steps.repo.outputs.name }}:latest
           cache-from: type=registry,ref=ghcr.io/${{ steps.repo.outputs.name }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ steps.repo.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          # buildx attaches a provenance attestation by default, which turns the
+          # tag into an OCI index. The platform pins and deploys one image
+          # manifest (OID 4.2 is its digest), so publish a plain manifest.
+          provenance: false
+          sbom: false
           build-args: |
             COMMIT_SHA=${{ github.sha }}
           labels: |

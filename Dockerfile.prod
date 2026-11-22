@@ -44,7 +44,7 @@ FROM nvidia/cuda:13.0.3-devel-ubuntu24.04
 # config dataclasses, entrypoints/common/cli_args.py); --max-cudagraph-capture-size
 # is deprecated under Model Runner V2 but still accepted. The V1 model runner
 # is GONE at this tag (it was last shipped in v0.33.0), so the
-# VLLM_USE_V2_MODEL_RUNNER=0 pin below no longer exists: this image runs V2.
+# VLLM_USE_V2_MODEL_RUNNER=0 pin is gone (v0.34 refuses it): this image runs V2.
 # If V2's CC-mode decode crash (see below) is still there, fall back to
 # v0.33.0, the last release with V1.
 #
@@ -187,10 +187,11 @@ ENV VLLM_BATCH_INVARIANT=1
 # a plain (non-CC) H100 VM, and V1 serves fine on the CVM with batch
 # invariance on and holding (solo / concurrent / solo byte-identical). V1
 # is what 0.28.0 ran in prod. Revisit when V2 is proven under CC mode.
-# v0.34.0 removed V1 and this switch with it: the image now runs V2, and the
-# first deploy of it is the CC-mode test. The env is left set because it is
-# harmless (vLLM no longer reads it) and documents the fallback.
-ENV VLLM_USE_V2_MODEL_RUNNER=0
+# v0.34.0 removed V1, and it REFUSES to start with the old switch set
+# ("VLLM_USE_V2_MODEL_RUNNER=0 is no longer supported: Model Runner V1 has
+# been removed. Unset this variable."), which took prod chat down on
+# 2026-11-22. So the image sets nothing and runs V2; the first deploy of it
+# is the CC-mode test.
 
 # Disable vLLM's unconditional Qwen Triton warmup (still present and
 # still unconditional at 0.28.0 — the assert below is the tripwire)

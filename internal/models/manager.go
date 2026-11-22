@@ -229,8 +229,8 @@ type Status struct {
 	Task        Task    `json:"task,omitempty"`
 	Model       string  `json:"model,omitempty"`
 	ModelDigest string  `json:"model_digest,omitempty"`
-	Progress    float64 `json:"progress,omitempty"`    // 0.0 - 1.0 during loading
-	Message     string  `json:"message,omitempty"`     // human-readable status
+	Progress    float64 `json:"progress,omitempty"` // 0.0 - 1.0 during loading
+	Message     string  `json:"message,omitempty"`  // human-readable status
 	ElapsedSec  float64 `json:"elapsed_s,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	// StderrTail is the recent vLLM stderr (up to the last 40 lines), surfaced
@@ -261,6 +261,7 @@ type Manager struct {
 	model        string
 	modelDigest  string
 	modelFiles   []ManifestEntry // the files the digest covers (digest.go)
+	modelRev     string          // the Hugging Face commit the snapshot holds, if any
 	quantization string
 	progress     float64
 	message      string
@@ -392,6 +393,14 @@ func (m *Manager) ModelFiles() []ManifestEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.modelFiles
+}
+
+// ModelRevision returns the Hugging Face commit the served snapshot holds,
+// or "" for a model that is not a hub snapshot (a /models directory).
+func (m *Manager) ModelRevision() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelRev
 }
 
 // Quantization returns the current quantization setting.
@@ -542,6 +551,7 @@ func (m *Manager) Load(req LoadRequest) error {
 	m.appliedReq = req
 	m.modelDigest = ""
 	m.modelFiles = nil
+	m.modelRev = ""
 	m.progress = 0
 	m.message = "Starting vLLM..."
 	m.loadStart = time.Now()
@@ -633,6 +643,7 @@ func (m *Manager) Unload() error {
 	m.model = ""
 	m.modelDigest = ""
 	m.modelFiles = nil
+	m.modelRev = ""
 	m.quantization = ""
 	m.progress = 0
 	m.message = ""
@@ -707,6 +718,13 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 	// sentinel is cleared on readiness. Entrypoint.sh separately wipes on
 	// image-digest change (cross-version invalidation).
 	m.wipeCachesIfDirtyLoad()
+
+	// The whole published commit, not just what this vLLM fetches, so the
+	// digest depends on the model alone (digest.go).
+	m.ifGen(gen, func() { m.message = "Fetching model files" })
+	if err := fetchFullSnapshot(ctx, modelPath); err != nil {
+		log.Printf("[models] %s: full snapshot of %q not fetched, vLLM fetches its own set: %v", m.task, modelPath, err)
+	}
 
 	args := buildVLLMArgs(req, modelPath, m.vllmPort)
 
@@ -900,6 +918,7 @@ func (m *Manager) runVLLM(ctx context.Context, req LoadRequest, loaderID, modelP
 		m.model = req.Model
 		m.modelDigest = digest
 		m.modelFiles = files
+		m.modelRev = snapshotRevision(modelDir)
 		m.genDefaults = &genDefaults
 		m.progress = 1.0
 		m.message = "Model loaded and serving"

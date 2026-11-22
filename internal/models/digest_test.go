@@ -4,6 +4,7 @@
 package models
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -107,5 +108,25 @@ func TestAmbiguousSnapshotsAreNotGuessed(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "bbbb"), 0o755)
 	if got := resolveModelDir("Org/Model"); got != "" {
 		t.Fatalf("two snapshots and no main ref must resolve to nothing, got %q", got)
+	}
+}
+
+func TestSnapshotRevision(t *testing.T) {
+	for in, want := range map[string]string{
+		"/data/.cache/huggingface/hub/models--Qwen--X/snapshots/c653bba46dfa": "c653bba46dfa",
+		"/models/qwen36-35b-a3b-fp8":                                          "",
+		"":                                                                    "",
+	} {
+		if got := snapshotRevision(in); got != want {
+			t.Fatalf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFetchFullSnapshotSkipsLocalDirectories(t *testing.T) {
+	for _, p := range []string{"/models/qwen", "qwen36-35b-a3b-fp8"} {
+		if err := fetchFullSnapshot(context.Background(), p); err != nil {
+			t.Fatalf("%s: a local model must not be fetched: %v", p, err)
+		}
 	}
 }

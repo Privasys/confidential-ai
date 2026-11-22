@@ -78,7 +78,7 @@ On chat completions it is a top-level key (or one `data:` frame before `[DONE]` 
 
 `POST /v1/models/load` declares the whole set in one call (`model`, optional `embedding_model` and `rerank_model`, plus per-model vLLM settings such as `max_model_len`, `kv_cache_dtype`, `max_num_seqs`). A model is a Hugging Face repository id, downloaded once into the app's encrypted volume, or a directory under `/models`. The set is saved on the volume and reloaded at every boot. Weights are read with vLLM's multi-threaded loader (`load_threads`, default 8).
 
-Each model's digest covers every byte vLLM reads. For a model on a dm-verity disk it is the disk's root hash. Otherwise it is the SHA-256 of a manifest in `sha256sum` format, one line per file sorted by path, which anyone can recompute from the same files:
+Each model's digest covers every byte vLLM reads. For a model on a dm-verity disk it is the disk's root hash. For a Hugging Face model, the whole published commit is fetched before vLLM starts, so the digest depends on that commit alone, not on which files a vLLM version happens to download; `/.well-known/served-models` names the commit as `revision`. The digest is the SHA-256 of a manifest in `sha256sum` format, one line per file (dotfiles excluded) sorted by path, which anyone can recompute from the same files:
 
 ```bash
 cd <snapshot> && find -L . -type f ! -name '.*' | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum | sha256sum

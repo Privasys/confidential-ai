@@ -4,12 +4,14 @@
 package models
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -217,4 +219,41 @@ func manifestDigest(entries []ManifestEntry) string {
 		fmt.Fprintf(h, "%s  %s\n", e.SHA256, e.Path)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// fetchFullSnapshot downloads every file of a Hugging Face repository's
+// current commit into the hub cache vLLM reads, before vLLM starts. vLLM
+// fetches only the files its version wants (the set grew between 0.29 and
+// 0.34, so the same weights got a different digest), while the digest
+// covers every file in the snapshot. With the whole commit present, the
+// digest is a function of the published commit alone, and anyone can check
+// it against the repository at that commit. Files already in the cache are
+// not downloaded again. A failure is logged and the load goes on: vLLM then
+// fetches what it needs, as before.
+func fetchFullSnapshot(ctx context.Context, repoID string) error {
+	if !strings.Contains(repoID, "/") || filepath.IsAbs(repoID) {
+		return nil // a local directory, not a Hugging Face id
+	}
+	cmd := exec.CommandContext(ctx, "python3", "-c",
+		"import sys\nfrom huggingface_hub import snapshot_download\nsnapshot_download(repo_id=sys.argv[1], cache_dir=sys.argv[2])",
+		repoID, hfHubDir())
+	cmd.Env = append(os.Environ(), "HF_HUB_DISABLE_PROGRESS_BARS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		tail := strings.TrimSpace(string(out))
+		if len(tail) > 400 {
+			tail = tail[len(tail)-400:]
+		}
+		return fmt.Errorf("%v: %s", err, tail)
+	}
+	return nil
+}
+
+// snapshotRevision returns the commit a Hugging Face snapshot directory
+// holds (its directory name), or "" for a model that is not a hub snapshot.
+func snapshotRevision(modelDir string) string {
+	if modelDir == "" || filepath.Base(filepath.Dir(modelDir)) != "snapshots" {
+		return ""
+	}
+	return filepath.Base(modelDir)
 }

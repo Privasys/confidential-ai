@@ -1341,6 +1341,9 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 		// order: a client checks each file against the publisher's hash and
 		// recomputes the digest without trusting this enclave.
 		Files []models.ManifestEntry `json:"files,omitempty"`
+		// Revision is the Hugging Face commit whose full file set the digest
+		// covers (empty for a model that is not a hub snapshot).
+		Revision string `json:"revision,omitempty"`
 	}
 	doc := map[string]any{
 		"image_digest": h.cfg.ImageDigest,
@@ -1364,11 +1367,12 @@ func (h *Handler) servedModels(w http.ResponseWriter, _ *http.Request) {
 				continue
 			}
 			served = append(served, servedModel{
-				Task:   string(task),
-				Model:  s.Model,
-				Digest: s.ModelDigest,
-				State:  string(s.State),
-				Files:  h.fleet.Instance(task).ModelFiles(),
+				Task:     string(task),
+				Model:    s.Model,
+				Digest:   s.ModelDigest,
+				State:    string(s.State),
+				Files:    h.fleet.Instance(task).ModelFiles(),
+				Revision: h.fleet.Instance(task).ModelRevision(),
 			})
 		}
 	} else if h.cfg.ModelName != "" {

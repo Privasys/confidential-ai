@@ -80,12 +80,23 @@ jobs:
             # The management-service accepts base64-encoded JSON natively.
             echo "json=$(jq -c . privasys.json | base64 -w0)" >> "$GITHUB_OUTPUT"
           fi
+      # A BuildKit registry cache next to the image. Without one, every run
+      # rebuilt the ~6 GB vLLM layer, which came out with a new digest and was
+      # uploaded again: the push alone took 705 s of a 20-minute job
+      # (2026-11-22). With it, a commit that only touches the Go proxy, a
+      # patch or a script reuses the heavy layers byte for byte, GHCR already
+      # holds their blobs, and only the changed layers upload. mode=max also
+      # caches the Go builder stage. The cache lives under its own tag in the
+      # same package, so its blobs are the image's blobs (no second copy).
+      - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.prod
           push: true
           tags: ghcr.io/${{ steps.repo.outputs.name }}:latest
+          cache-from: type=registry,ref=ghcr.io/${{ steps.repo.outputs.name }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.repo.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
           build-args: |
             COMMIT_SHA=${{ github.sha }}
           labels: |

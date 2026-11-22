@@ -292,6 +292,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/attestation-extensions", h.attestationExtensions)
 	mux.HandleFunc("GET /.well-known/served-models", h.servedModels)
 	mux.HandleFunc("GET /metrics", h.metrics)
+	// POST too, like /health: the platform's call path (privasys apps call)
+	// always POSTs, and GET routes outside .well-known are only reachable
+	// over the sealed transport, which left no way to read them from the CLI.
+	mux.HandleFunc("POST /metrics", h.metrics)
 	// Billing configure is a privileged surface: it names where usage
 	// reports go and the bearer they carry, so an open endpoint lets anyone
 	// reachable over the RA-TLS-direct leg disable metering or steal the
@@ -1385,6 +1389,45 @@ func (h *Handler) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# HELP confidential_ai_requests_failed_total Failed inference requests.\n")
 	fmt.Fprintf(w, "# TYPE confidential_ai_requests_failed_total counter\n")
 	fmt.Fprintf(w, "confidential_ai_requests_failed_total %d\n", h.requestsFailed.Load())
+	h.writeEngineMetrics(w)
+}
+
+// writeEngineMetrics appends the chat engine's own Prometheus families
+// (every "vllm:" line: KV-cache usage, prefix-cache queries and hits,
+// preemptions, queue and prefill times, token counts). They are aggregate
+// counters and histograms with model and engine labels only, nothing per
+// request. Best effort: a model that is not up yet adds nothing.
+func (h *Handler) writeEngineMetrics(w io.Writer) {
+	if h.fleet == nil || h.fleet.Generate() == nil {
+		return
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(h.fleet.Generate().Upstream() + "/metrics")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	writeEngineLines(w, io.LimitReader(resp.Body, 4<<20))
+}
+
+// writeEngineLines copies the "vllm:" families, with their HELP and TYPE
+// lines, and drops everything else (Python process and GC metrics).
+func writeEngineLines(w io.Writer, r io.Reader) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		name := line
+		if strings.HasPrefix(line, "# HELP ") || strings.HasPrefix(line, "# TYPE ") {
+			name = line[len("# HELP "):]
+		}
+		if strings.HasPrefix(name, "vllm:") {
+			fmt.Fprintln(w, line)
+		}
+	}
 }
 
 // requestParams captures the sampling parameters from an OpenAI-compatible request.

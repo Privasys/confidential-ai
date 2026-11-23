@@ -19,10 +19,11 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 # FlashInfer pinned by URL as in the production image; only the H100
 # (sm90a) jit-cache provider, with the wrapper, without dependencies.
-# torchaudio: main pins 2.11.1, which has no cu130 wheel yet; 2.11.0 is the
-# one on the cu130 index, and nothing here uses audio.
+# main pins torchvision 0.29.2 and torchaudio 2.11.1, which have no Linux
+# wheel published anywhere yet; the cu130 index's 0.29.1 and 2.11.0 are the
+# matching releases for torch 2.14.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
-    echo "torchaudio==2.11.0" > /tmp/overrides.txt && \
+    printf 'torchvision==0.29.1\ntorchaudio==2.11.0\n' > /tmp/overrides.txt && \
     uv pip install --system --torch-backend=cu130 --override /tmp/overrides.txt \
       "https://wheels.vllm.ai/${VLLM_BASE}/${VLLM_WHEEL}" \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl" && \
@@ -62,5 +63,6 @@ ENV VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0
 COPY run.sh serve.py kv_test.py /opt/bi-test/
 RUN chmod +x /opt/bi-test/run.sh
 
+LABEL org.opencontainers.image.source="https://github.com/Privasys/vllm"
 LABEL ai.privasys.devices="/dev/nvidia0,/dev/nvidiactl,/dev/nvidia-uvm,/dev/nvidia-uvm-tools"
 ENTRYPOINT ["/opt/bi-test/run.sh"]

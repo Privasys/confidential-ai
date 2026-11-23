@@ -185,6 +185,7 @@
       "role": "action",
       "description": "Unload the current model and stop vLLM. Frees GPU memory so a different model can be loaded.",
       "endpoint": "/v1/models/unload",
+      "x-privasys": { "auth": "owner" },
       "inputSchema": {
         "type": "object",
         "properties": {}

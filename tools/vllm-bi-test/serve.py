@@ -18,6 +18,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0].strip("/")
+        if path in ("health", "healthz", "readiness"):
+            # The manager health-checks the container; a 404 here gets it
+            # killed as unhealthy.
+            self._send(200, b"ok")
+            return
         tail = path.startswith("tail/")
         name = os.path.basename(path[5:] if tail else path)
         if not name:

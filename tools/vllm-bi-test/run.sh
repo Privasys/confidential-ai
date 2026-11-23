@@ -15,7 +15,7 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env kv-unit kv-before kv bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+STEPS=${STEPS:-"env kv-unit kv-before kv kv-bi bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -66,16 +66,16 @@ bench() { # bi
   return $code
 }
 
-kv() { # the CPU KV tier under CC: starts, byte-identical hits, timings
+kv() { # bi: the CPU KV tier under CC: starts, hits, timings (byte-identical required with bi=1)
   # Dev mode exposes /reset_prefix_cache: the test clears the GPU prefix
   # cache so its repeat request can only be served from the CPU tier.
-  VLLM_SERVER_DEV_MODE=1 VLLM_BATCH_INVARIANT=1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
+  VLLM_SERVER_DEV_MODE=1 VLLM_BATCH_INVARIANT=$1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
     --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
     --kv-offloading-size 16 \
-    --default-chat-template-kwargs '{"enable_thinking": false}' > "$LOGS/kv.server.log" 2>&1 &
+    --default-chat-template-kwargs '{"enable_thinking": false}' > "$LOGS/kv-$1.server.log" 2>&1 &
   local pid=$!
   for _ in $(seq 1 360); do curl -sf localhost:8100/health >/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 5; done
-  python3 /opt/bi-test/kv_test.py http://localhost:8100 $M36
+  python3 /opt/bi-test/kv_test.py http://localhost:8100 $M36 $1
   local code=$?
   kill $pid; wait $pid 2>/dev/null
   return $code
@@ -107,7 +107,8 @@ kv_before() { # on this hardware, the unpatched engine fails to start the CPU ti
 run env bash -c 'nvidia-smi; python3 -c "import vllm, torch; print(vllm.__version__, torch.__version__)"; cat /opt/gdn-bi.commits'
 run kv-unit kv_unit
 run kv-before kv_before
-run kv kv
+run kv kv 0
+run kv-bi kv 1
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

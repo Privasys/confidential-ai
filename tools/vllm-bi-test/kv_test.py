@@ -7,7 +7,8 @@ so the same request can only hit the CPU tier. Checks:
      again from the GPU;
   2. the offload connector loaded blocks back from the CPU tier;
   3. time to first token, cold against CPU hit against GPU hit.
-Exit status 0 only if 1 and 2 hold.
+Exit status 0 only if 2 holds, and 1 when run with batch invariance
+(third argument "1"); without it, 1 is reported only.
 """
 
 import json
@@ -19,6 +20,7 @@ import urllib.request
 
 BASE = sys.argv[1]  # e.g. http://localhost:8100
 MODEL = sys.argv[2]
+BATCH_INVARIANT = len(sys.argv) > 3 and sys.argv[3] == "1"
 
 
 def prompt(seed: int, n_words: int = 6000) -> str:
@@ -94,4 +96,4 @@ if not same:
     print("cold   :", repr(cold))
     print("cpu hit:", repr(cpu_hit))
     print("gpu hit:", repr(gpu_hit))
-sys.exit(0 if same and loaded else 1)
+sys.exit(0 if loaded and (same or not BATCH_INVARIANT) else 1)

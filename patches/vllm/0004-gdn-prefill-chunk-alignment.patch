@@ -1,0 +1,128 @@
+GDN batch invariance under chunked prefill and prefix caching (onto v0.34.0
++ 0001).
+
+The FLA prefill kernels split a sequence into 64-token chunks counted from
+the first token of each prefill chunk. When the scheduler splits a prompt at
+a position that is not a multiple of 64 (a chunk that shares the token
+budget with other requests), or a prefill resumes from a prefix-cache hit off
+that grid, the recurrent state is reduced in another order and the output
+differs from the same prompt run alone. Measured on Imperial 2026-11-23: the
+reviewer's test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill fails
+on every Qwen GDN model without this, and passes with the equivalent fix on
+vllm main (the Privasys/vllm branch below). This port is not yet measured.
+
+- Scheduler: with VLLM_BATCH_INVARIANT and a GDN_ATTN Mamba group, every
+  prefill chunk but the last ends on FLA_CHUNK_SIZE; a waiting prefill whose
+  budget is below that waits a step.
+- Platform: in align mode under VLLM_BATCH_INVARIANT, the hybrid block size
+  is a multiple of FLA_CHUNK_SIZE, so prefix-cache hits land on the grid.
+
+Upstream form: Privasys/vllm gdn-batch-invariance (a layer-declared
+prefill_chunk_alignment on main, where the Triton path already aligns blocks).
+
+diff --git a/vllm/platforms/interface.py b/vllm/platforms/interface.py
+index a779b4d7e..7d62a7ebf 100644
+--- a/vllm/platforms/interface.py
++++ b/vllm/platforms/interface.py
+@@ -1104,6 +1104,18 @@ class Platform:
+                 kernel_block_alignment_size,
+                 get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+             )
++            import vllm.envs as envs
++
++            if envs.VLLM_BATCH_INVARIANT:
++                # GDN batch invariance: a prefill resuming from a cached
++                # state must start on the FLA chunk grid.
++                from vllm.third_party.flash_linear_attention.ops.utils import (
++                    FLA_CHUNK_SIZE,
++                )
++
++                kernel_block_alignment_size = lcm(
++                    kernel_block_alignment_size, FLA_CHUNK_SIZE
++                )
+ 
+         # Use minimum block size that satisfies both backend alignment and
+         # mamba page size compatibility
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 3dd7aa3d0..2470cb4db 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -7,6 +7,7 @@ from collections.abc import Iterable
+ from dataclasses import replace
+ from typing import Any
+ 
++import vllm.envs as envs
+ from vllm.compilation.cuda_graph import CUDAGraphStat
+ from vllm.config import KVEventsConfig, VllmConfig
+ from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
+@@ -457,6 +458,24 @@ class Scheduler(SchedulerInterface):
+             or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+             for group in kv_cache_config.kv_cache_groups
+         )
++        # GDN batch invariance: the FLA prefill chunks start at each prefill
++        # chunk's first token, so every prefill chunk but the last must end on
++        # FLA_CHUNK_SIZE or the output depends on how the prefill was split.
++        self.prefill_chunk_alignment: int | None = None
++        from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
++        from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
++
++        if envs.VLLM_BATCH_INVARIANT and any(
++            isinstance(group.kv_cache_spec, MambaSpec)
++            and group.kv_cache_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
++            for group in kv_cache_config.kv_cache_groups
++        ):
++            self.prefill_chunk_alignment = FLA_CHUNK_SIZE
++            if self.max_num_scheduled_tokens < FLA_CHUNK_SIZE:
++                raise ValueError(
++                    f"max_num_batched_tokens must be at least {FLA_CHUNK_SIZE} "
++                    "for GDN batch invariance."
++                )
+         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
+         # Split there only if the backend cannot save it within the final chunk.
+         self.mamba_partial_cache_hit = (
+@@ -560,6 +579,18 @@ class Scheduler(SchedulerInterface):
+         # Reaching max_tokens finishes the request, so no step verifies the drafts.
+         return min_num_output_tokens >= request.max_tokens
+ 
++    def _prefill_chunk_aligned_split(
++        self, request: Request, num_new_tokens: int, num_skipped_tokens: int = 0
++    ) -> int:
++        """Clip a prefill chunk that does not finish the prefill so that it
++        ends on `prefill_chunk_alignment`."""
++        assert self.prefill_chunk_alignment is not None
++        start = request.num_computed_tokens + num_skipped_tokens
++        end = start + num_new_tokens
++        if end >= max(request.num_prompt_tokens, request.num_tokens - 1):
++            return num_new_tokens
++        return max(0, end - end % self.prefill_chunk_alignment - start)
++
+     def _mamba_block_aligned_split(
+         self,
+         request: Request,
+@@ -877,6 +908,10 @@ class Scheduler(SchedulerInterface):
+                 num_new_tokens = self._mamba_block_aligned_split(
+                     request, num_new_tokens
+                 )
++            if self.prefill_chunk_alignment is not None:
++                num_new_tokens = self._prefill_chunk_aligned_split(
++                    request, num_new_tokens
++                )
+ 
+             # Schedule encoder inputs.
+             encoder_inputs_to_schedule = None
+@@ -1418,6 +1453,15 @@ class Scheduler(SchedulerInterface):
+                             # so drop the padding instead of shortening it.
+                             num_new_tokens = 1
+                             pad_spec_decode = False
++                    if self.prefill_chunk_alignment is not None:
++                        num_new_tokens = self._prefill_chunk_aligned_split(
++                            request,
++                            num_new_tokens,
++                            num_new_local_computed_tokens
++                            + num_external_computed_tokens,
++                        )
++                        if num_new_tokens == 0:
++                            break
+ 
+                     # Schedule encoder inputs.
+                     if request.has_encoder_inputs:

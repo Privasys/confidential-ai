@@ -161,15 +161,28 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 # itself), 0002 is retired (the PR reads host-side boundaries, so there is no
 # device-to-host sync left to remove), 0003 moved with the converter. The
 # bitwise check must be re-measured on this rebase before it is trusted.
+#
+# Added 2026-11-23:
+#   0004: under batch invariance, non-final GDN prefill chunks end on the FLA
+#         chunk size (64), and align-mode Mamba blocks are a multiple of it,
+#         so a prompt split by the token budget or resumed from a cache hit
+#         gives the same recurrent state (the fix in our upstream PR #69488).
+#   0005: SimpleCPUOffload keeps its CPU KV buffers unpinned under NVIDIA CC
+#         (upstream PR #69432), so the CPU prefix-cache tier
+#         (kv_offloading_size_gb) can start on the H100 in CC mode.
 COPY patches/vllm/ /opt/vllm-patches/
 RUN cd /usr/local/lib/python3.12/dist-packages && \
     for p in /opt/vllm-patches/0001-gdn-batch-invariance-pr45819.patch \
-             /opt/vllm-patches/0003-anthropic-messages-seed.patch; do \
+             /opt/vllm-patches/0003-anthropic-messages-seed.patch \
+             /opt/vllm-patches/0004-gdn-prefill-chunk-alignment.patch \
+             /opt/vllm-patches/0005-simple-cpu-offload-unpinned-under-cc.patch; do \
       patch -p1 --forward --no-backup-if-mismatch < "$p" || exit 1; \
     done && \
-    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ('vllm/entrypoints/anthropic/protocol.py','vllm/entrypoints/anthropic/serving.py','vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py','vllm/model_executor/layers/mamba/gdn/base.py','vllm/v1/attention/backends/gdn_attn.py')]; print('vllm patches applied')" && \
+    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ('vllm/entrypoints/anthropic/protocol.py','vllm/entrypoints/anthropic/serving.py','vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py','vllm/model_executor/layers/mamba/gdn/base.py','vllm/v1/attention/backends/gdn_attn.py','vllm/v1/core/sched/scheduler.py','vllm/platforms/interface.py','vllm/v1/simple_kv_offload/worker.py')]; print('vllm patches applied')" && \
     grep -q 'return backend, "triton"' vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py && \
-    grep -q "seed=anthropic_request.seed" vllm/entrypoints/anthropic/serving.py
+    grep -q "seed=anthropic_request.seed" vllm/entrypoints/anthropic/serving.py && \
+    grep -q "_prefill_chunk_aligned_split" vllm/v1/core/sched/scheduler.py && \
+    grep -q "CPU offload buffers" vllm/v1/simple_kv_offload/worker.py
 
 # Every engine this image starts runs batch-invariant: a request's tokens no
 # longer depend on what else vLLM batched with it, so the same seed, prompt

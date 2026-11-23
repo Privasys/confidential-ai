@@ -1,0 +1,43 @@
+Keep SimpleCPUOffload's CPU KV buffers unpinned under NVIDIA Confidential
+Computing.
+
+Upstream PR vllm-project/vllm#69432 (Privasys/vllm cpu-kv-offload-cc,
+62556f767), runtime file only; the diff applies unchanged onto v0.34.0.
+
+The connector pins its CPU KV buffers with cudaHostRegister, which the H100
+refuses for guest memory in CC mode, so `--kv-offloading-size` killed the
+engine at start (prod Imperial 2026-11-23 00:35, reverted). With this the
+buffers stay in the TD's private anonymous mapping, unpinned, and the DMA
+backend copies from pageable memory. Measured on Imperial with this exact
+change on main: 6,336 of 6,505 prompt tokens reloaded from the CPU tier,
+TTFT 0.196 s vs 4.47 s cold, output byte-identical to the GPU-cache hit.
+
+diff --git a/vllm/v1/simple_kv_offload/worker.py b/vllm/v1/simple_kv_offload/worker.py
+index cac204c14..7160569e6 100644
+--- a/vllm/v1/simple_kv_offload/worker.py
++++ b/vllm/v1/simple_kv_offload/worker.py
+@@ -9,6 +9,7 @@ import torch
+ 
+ from vllm.config import VllmConfig
+ from vllm.logger import init_logger
++from vllm.platforms import current_platform
+ from vllm.utils.host_memory import (
+     host_registration_ranges,
+     pin_tensor,
+@@ -245,7 +246,15 @@ class SimpleCPUOffloadWorker:
+         )
+ 
+         pin_memory = PIN_MEMORY
+-        if not pin_memory:
++        if pin_memory and current_platform.is_confidential_compute():
++            # The GPU cannot register guest memory under Confidential
++            # Computing; copies from pageable memory still work.
++            logger.info(
++                "NVIDIA Confidential Computing detected; CPU offload buffers "
++                "are not pinned."
++            )
++            pin_memory = False
++        elif not pin_memory:
+             logger.warning(
+                 "Pinned memory not available. CPU offload performance may be degraded."
+             )

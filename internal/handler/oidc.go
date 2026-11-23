@@ -40,7 +40,27 @@ type OIDCVerifier struct {
 	mu        sync.RWMutex
 	keys      map[string]*oidcJWK
 	fetchedAt time.Time
+	// lastAttempt is when the key set was last fetched or tried, success or
+	// failure (under mu). fetchMu serialises fetches, outside mu, so a token
+	// checked against known keys never waits on the network.
+	lastAttempt time.Time
+	lastErr     error
+	fetchMu     sync.Mutex
 }
+
+// The key set is refreshed after oidcKeysTTL, fetched at most once per
+// oidcMinRefetch (oidcRetryAfterFailure while the last attempt failed or no
+// set is held yet), and a held set stops verifying oidcMaxStale after it was
+// fetched, so a key removed at the issuer cannot verify forever while the
+// issuer is unreachable. A fetch runs on its own context, bounded by
+// oidcFetchTimeout, so a caller cannot cancel it to block refreshes.
+const (
+	oidcKeysTTL           = 5 * time.Minute
+	oidcMinRefetch        = 30 * time.Second
+	oidcRetryAfterFailure = 3 * time.Second
+	oidcMaxStale          = time.Hour
+	oidcFetchTimeout      = 20 * time.Second
+)
 
 // OIDCClaims is the subset of a verified token the handler needs.
 type OIDCClaims struct {
@@ -403,10 +423,16 @@ func (v *OIDCVerifier) Verify(ctx context.Context, token string) (*OIDCClaims, e
 	if v.audience != "" && !oidcCheckAudience(claims, v.audience) {
 		return nil, fmt.Errorf("oidc: audience missing %q", v.audience)
 	}
-	if exp, ok := claims["exp"].(float64); ok {
-		if time.Now().Unix() > int64(exp) {
-			return nil, errors.New("oidc: token expired")
-		}
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return nil, errors.New("oidc: token has no expiry")
+	}
+	now := time.Now().Unix()
+	if now > int64(exp) {
+		return nil, errors.New("oidc: token expired")
+	}
+	if nbf, ok := claims["nbf"].(float64); ok && now+30 < int64(nbf) {
+		return nil, errors.New("oidc: token not yet valid")
 	}
 
 	sub, _ := claims["sub"].(string)
@@ -465,46 +491,112 @@ type oidcJWK struct {
 	Y   string `json:"y"`
 }
 
-func (v *OIDCVerifier) signingKey(ctx context.Context, kid, alg string) (*oidcJWK, error) {
-	v.mu.RLock()
-	if len(v.keys) > 0 && time.Since(v.fetchedAt) < 5*time.Minute {
-		if k, ok := v.keys[kid]; ok {
-			v.mu.RUnlock()
+func (v *OIDCVerifier) signingKey(_ context.Context, kid, alg string) (*oidcJWK, error) {
+	s := v.snapshot()
+	held := s.usable(kid, alg)
+	if held != nil && time.Since(s.fetchedAt) < oidcKeysTTL {
+		return held, nil
+	}
+
+	// The key is unknown or the set is past its TTL. A caller holding a
+	// still-usable key never waits on a refresh another caller is doing.
+	if held != nil {
+		if !v.fetchMu.TryLock() {
+			return held, nil
+		}
+	} else {
+		v.fetchMu.Lock()
+	}
+	defer v.fetchMu.Unlock()
+
+	s = v.snapshot()
+	if k := s.usable(kid, alg); k != nil && time.Since(s.fetchedAt) < oidcKeysTTL {
+		return k, nil
+	}
+	wait := oidcMinRefetch
+	if s.lastErr != nil || len(s.keys) == 0 {
+		wait = oidcRetryAfterFailure
+	}
+	if time.Since(s.lastAttempt) < wait {
+		if k := s.usable(kid, alg); k != nil {
 			return k, nil
 		}
+		if s.lastErr != nil {
+			return nil, s.lastErr
+		}
+		return nil, fmt.Errorf("key %q not in JWKS", kid)
 	}
-	v.mu.RUnlock()
 
+	// The fetch has its own context: a caller cancelling its request must not
+	// abort a refresh everyone relies on.
+	fctx, cancel := context.WithTimeout(context.Background(), oidcFetchTimeout)
+	defer cancel()
+	fresh, err := v.fetchKeys(fctx)
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if len(v.keys) > 0 && time.Since(v.fetchedAt) < 5*time.Minute {
-		if k, ok := v.keys[kid]; ok {
+	v.lastAttempt, v.lastErr = time.Now(), err
+	if err == nil {
+		v.keys, v.fetchedAt = fresh, time.Now()
+	}
+	v.mu.Unlock()
+	if err != nil {
+		// The issuer is unreachable: a key held within oidcMaxStale still
+		// verifies.
+		if k := s.usable(kid, alg); k != nil {
 			return k, nil
 		}
+		return nil, err
 	}
+	if k := pickKey(fresh, kid, alg); k != nil {
+		return k, nil
+	}
+	return nil, fmt.Errorf("key %q not in JWKS", kid)
+}
 
+// keySnapshot is the verifier's key state at one moment.
+type keySnapshot struct {
+	keys        map[string]*oidcJWK
+	fetchedAt   time.Time
+	lastAttempt time.Time
+	lastErr     error
+}
+
+// usable returns the key a token names from a set fetched within
+// oidcMaxStale, or nil.
+func (s keySnapshot) usable(kid, alg string) *oidcJWK {
+	if time.Since(s.fetchedAt) >= oidcMaxStale {
+		return nil
+	}
+	return pickKey(s.keys, kid, alg)
+}
+
+func (v *OIDCVerifier) snapshot() keySnapshot {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return keySnapshot{keys: v.keys, fetchedAt: v.fetchedAt, lastAttempt: v.lastAttempt, lastErr: v.lastErr}
+}
+
+func (v *OIDCVerifier) fetchKeys(ctx context.Context) (map[string]*oidcJWK, error) {
 	jwksURL, err := v.discoverJWKS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := v.fetchJWKS(ctx, jwksURL)
-	if err != nil {
-		return nil, err
-	}
-	v.keys = keys
-	v.fetchedAt = time.Now()
+	return v.fetchJWKS(ctx, jwksURL)
+}
 
+// pickKey returns the key a token names, or for a token naming none, the
+// first signing key of its algorithm.
+func pickKey(keys map[string]*oidcJWK, kid, alg string) *oidcJWK {
 	if k, ok := keys[kid]; ok {
-		return k, nil
+		return k
 	}
 	if kid == "" {
 		for _, k := range keys {
 			if k.Alg == alg || (k.Use == "sig" && k.Alg == "") {
-				return k, nil
+				return k
 			}
 		}
 	}
-	return nil, fmt.Errorf("key %q not in JWKS", kid)
+	return nil
 }
 
 func (v *OIDCVerifier) discoverJWKS(ctx context.Context) (string, error) {

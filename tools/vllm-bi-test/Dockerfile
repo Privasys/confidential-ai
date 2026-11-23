@@ -21,7 +21,7 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 # (sm90a) jit-cache provider, with the wrapper, without dependencies.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
     uv pip install --system --torch-backend=cu130 \
-      "https://wheels.vllm.ai/${VLLM_BASE}/vllm/${VLLM_WHEEL}" \
+      "https://wheels.vllm.ai/${VLLM_BASE}/${VLLM_WHEEL}" \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl" && \
     uv pip install --system --no-deps \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_jit_cache-0.7.4+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" \

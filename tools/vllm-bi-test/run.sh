@@ -49,6 +49,12 @@ run() { # step command...
   status "$step" done "$code"
 }
 
+lm() { # bi: gsm8k as the chat model is served, thinking off
+  VLLM_BATCH_INVARIANT=$1 lm_eval --model vllm \
+    --model_args pretrained=$M36,max_model_len=8192,gpu_memory_utilization=0.85,enable_thinking=False \
+    --tasks gsm8k --num_fewshot 5 --apply_chat_template --fewshot_as_multiturn --batch_size auto
+}
+
 bench() { # bi
   VLLM_BATCH_INVARIANT=$1 vllm serve $M36 --max-model-len 8192 --port 8100 > "$LOGS/bench-$1.server.log" 2>&1 &
   local pid=$!
@@ -105,8 +111,8 @@ run kv kv
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
-run lm-0 env VLLM_BATCH_INVARIANT=0 lm_eval --model vllm --model_args pretrained=$M36,max_model_len=8192,gpu_memory_utilization=0.85 --tasks gsm8k --num_fewshot 5 --batch_size auto
-run lm-1 env VLLM_BATCH_INVARIANT=1 lm_eval --model vllm --model_args pretrained=$M36,max_model_len=8192,gpu_memory_utilization=0.85 --tasks gsm8k --num_fewshot 5 --batch_size auto
+run lm-0 lm 0
+run lm-1 lm 1
 run bench-0 bench 0
 run bench-1 bench 1
 status all done

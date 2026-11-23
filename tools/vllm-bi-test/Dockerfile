@@ -35,11 +35,11 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
 # The branches: the batch-invariance branch's tests/ tree, and both branches'
 # diffs (batch invariance, CPU KV tier under CC) applied onto the wheel.
 ARG KV_BRANCH=cpu-kv-offload-cc
-# The branch heads, so a moved branch invalidates the clone below (BuildKit
-# otherwise reuses the cached layer: the command text does not change).
-ADD https://api.github.com/repos/Privasys/vllm/commits/${BRANCH} /opt/head-bi.json
-ADD https://api.github.com/repos/Privasys/vllm/commits/${KV_BRANCH} /opt/head-kv.json
-RUN git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git /opt/vllm-src && \
+# The branch heads (set by the workflow), so a moved branch invalidates the
+# clone below (BuildKit otherwise reuses the cached layer).
+ARG BI_HEAD=unset
+ARG KV_HEAD=unset
+RUN echo "heads: $BI_HEAD $KV_HEAD" && git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git /opt/vllm-src && \
     cd /opt/vllm-src && git fetch --depth 1 origin ${VLLM_BASE} && \
     git diff ${VLLM_BASE} HEAD -- vllm/ > /opt/gdn-bi.patch && \
     git log --oneline ${VLLM_BASE}..HEAD > /opt/gdn-bi.commits && \

@@ -72,6 +72,9 @@ def reset_gpu_prefix_cache() -> None:
     urllib.request.urlopen(req, timeout=60).read()
 
 
+# A different prompt of the same length first, so the cold timing excludes
+# the server's first-request warmup.
+chat(prompt(2))
 target = prompt(1)
 cold, t_cold = chat(target)
 time.sleep(2)  # let the store to the CPU tier finish

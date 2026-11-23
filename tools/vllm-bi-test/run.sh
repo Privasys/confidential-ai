@@ -3,7 +3,11 @@
 # /data/logs/<step>.log and its result in /data/logs/status.json, then keeps
 # serving the logs. STEPS (space-separated) picks the steps to run.
 set -u
-export HOME=/data
+# Model weights (public) and compile caches live on the container filesystem
+# (the guest workspace disk): Imperial's volume pool has ~20 GB free. Only
+# the logs go on the encrypted /data volume.
+export HOME=/opt/home HF_HOME=/opt/home/.cache/huggingface
+mkdir -p "$HOME"
 # tests/ imports tests.utils; the source copy of vllm/ was removed in the
 # image, so `import vllm` still resolves to the patched installed wheel.
 export PYTHONPATH=/opt/vllm-src

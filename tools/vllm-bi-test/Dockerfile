@@ -8,8 +8,8 @@
 # same way the production image patches its release wheel.
 FROM nvidia/cuda:13.0.3-devel-ubuntu24.04
 
-ARG VLLM_BASE=edccd1e39ede897504babb9a50aa8bba26089bbb
-ARG VLLM_WHEEL=vllm-0.34.0rc1.dev1148%2Bgedccd1e39-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_BASE=d9bfe86b9fe1156642ac45aadef965159dd1d7f1
+ARG VLLM_WHEEL=vllm-0.34.0rc1.dev1181%2Bgd9bfe86b9-cp38-abi3-manylinux_2_28_x86_64.whl
 ARG BRANCH=gdn-batch-invariance
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,8 +46,8 @@ RUN echo "heads: $BI_HEAD $KV_HEAD" && git clone --depth 4 --branch ${BRANCH} ht
     git fetch --depth 3 origin ${KV_BRANCH} && \
     git diff ${VLLM_BASE} FETCH_HEAD -- vllm/ > /opt/kv-cc.patch && \
     git log --oneline ${VLLM_BASE}..FETCH_HEAD >> /opt/gdn-bi.commits && \
-    git show FETCH_HEAD:tests/v1/kv_connector/unit/test_simple_cpu_offload_cc.py \
-      > tests/v1/kv_connector/unit/test_simple_cpu_offload_cc.py && \
+    git show FETCH_HEAD:tests/v1/simple_kv_offload/test_worker.py \
+      > tests/v1/simple_kv_offload/test_worker.py && \
     cd /usr/local/lib/python3.12/dist-packages && \
     patch -p1 --forward --no-backup-if-mismatch < /opt/gdn-bi.patch && \
     patch -p1 --forward --no-backup-if-mismatch < /opt/kv-cc.patch && \

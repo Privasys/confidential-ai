@@ -84,7 +84,7 @@ kv() { # the CPU KV tier under CC: starts, byte-identical hits, timings
 SITE=/usr/local/lib/python3.12/dist-packages
 unpatch_kv() { patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
 repatch_kv() { patch -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
-KV_UNIT=v1/kv_connector/unit/test_simple_cpu_offload_cc.py
+KV_UNIT="v1/simple_kv_offload/test_worker.py -k confidential_compute"
 
 kv_unit() { # the unit test passes with the CC patch and fails without it
   pytest -v $KV_UNIT; local with=$?

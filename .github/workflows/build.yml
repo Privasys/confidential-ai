@@ -11,7 +11,7 @@ on:
       - 'Dockerfile.prod'
       - 'scripts/**'
       - 'models/**'
-      - '.github/workflows/**'
+      - '.github/workflows/build.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:

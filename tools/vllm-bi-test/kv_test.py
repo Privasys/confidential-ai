@@ -1,11 +1,12 @@
 """CPU KV tier check against a local `vllm serve` (see run.sh, step kv).
 
-The server runs with a deliberately small GPU KV cache, so a long prompt's
-blocks are evicted to the CPU tier by a few other long prompts. Then:
-  1. the same seeded request is byte-identical served cold, from the CPU tier,
-     and again (GPU hit);
-  2. the CPU-tier hit counter rises;
-  3. time to first token, cold against CPU hit.
+The server runs with VLLM_SERVER_DEV_MODE=1. After a cold request, the GPU
+prefix cache is cleared (POST /reset_prefix_cache, which keeps the CPU tier),
+so the same request can only hit the CPU tier. Checks:
+  1. the seeded request is byte-identical served cold, from the CPU tier, and
+     again from the GPU;
+  2. the offload connector loaded blocks back from the CPU tier;
+  3. time to first token, cold against CPU hit against GPU hit.
 Exit status 0 only if 1 and 2 hold.
 """
 
@@ -48,33 +49,49 @@ def chat(text: str) -> tuple[str, float]:
     return "".join(out), ttft or 0.0
 
 
-def metric(name: str) -> float:
+def offload_metrics() -> dict[str, float]:
+    """Every simple_kv_offload / external prefix-cache / cached-by-source sample."""
     text = urllib.request.urlopen(BASE + "/metrics", timeout=30).read().decode()
-    total = 0.0
+    out: dict[str, float] = {}
     for line in text.splitlines():
-        if line.startswith(name):
-            m = re.search(r"\s([0-9.eE+-]+)$", line)
-            if m:
-                total += float(m.group(1))
-    return total
+        if line.startswith("#"):
+            continue
+        if re.match(r"vllm:(simple_kv_offload|external_prefix_cache|prompt_tokens_cached_by_source)", line):
+            name, _, value = line.rpartition(" ")
+            try:
+                out[name] = float(value)
+            except ValueError:
+                pass
+    return out
+
+
+def reset_gpu_prefix_cache() -> None:
+    req = urllib.request.Request(BASE + "/reset_prefix_cache", b"", method="POST")
+    urllib.request.urlopen(req, timeout=60).read()
 
 
 target = prompt(1)
 cold, t_cold = chat(target)
-for s in range(2, 8):  # evict the target's blocks to the CPU tier
-    chat(prompt(s))
-host_before = metric('vllm:prompt_tokens_cached_by_source_total{source="host"') + metric("vllm:external_prefix_cache_hits_total")
+time.sleep(2)  # let the store to the CPU tier finish
+before = offload_metrics()
+reset_gpu_prefix_cache()
 cpu_hit, t_cpu = chat(target)
-host_after = metric('vllm:prompt_tokens_cached_by_source_total{source="host"') + metric("vllm:external_prefix_cache_hits_total")
+after = offload_metrics()
 gpu_hit, t_gpu = chat(target)
 
+changed = {k: after.get(k, 0) - before.get(k, 0) for k in after if after.get(k, 0) != before.get(k, 0)}
+loaded = any(("load" in k or "hit" in k or 'source="host"' in k or "cpu" in k) and v > 0 for k, v in changed.items())
 same = cold == cpu_hit == gpu_hit
+
 print(f"cold      ttft {t_cold:.3f}s")
-print(f"cpu hit   ttft {t_cpu:.3f}s  (host-tier tokens +{host_after - host_before:.0f})")
+print(f"cpu hit   ttft {t_cpu:.3f}s")
 print(f"gpu hit   ttft {t_gpu:.3f}s")
-print(f"byte-identical: {same}")
+print("offload counters that moved on the CPU-hit request:")
+for k, v in sorted(changed.items()):
+    print(f"  {k} +{v:g}")
+print(f"byte-identical: {same}   cpu tier read back: {loaded}")
 if not same:
     print("cold   :", repr(cold))
     print("cpu hit:", repr(cpu_hit))
     print("gpu hit:", repr(gpu_hit))
-sys.exit(0 if same and host_after > host_before else 1)
+sys.exit(0 if same and loaded else 1)

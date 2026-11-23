@@ -61,10 +61,11 @@ bench() { # bi
 }
 
 kv() { # the CPU KV tier under CC: starts, byte-identical hits, timings
-  # A small GPU KV cache makes a few long prompts evict to the CPU tier.
-  VLLM_BATCH_INVARIANT=1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
+  # Dev mode exposes /reset_prefix_cache: the test clears the GPU prefix
+  # cache so its repeat request can only be served from the CPU tier.
+  VLLM_SERVER_DEV_MODE=1 VLLM_BATCH_INVARIANT=1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
     --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
-    --num-gpu-blocks-override 64 --kv-offloading-size 16 \
+    --kv-offloading-size 16 \
     --default-chat-template-kwargs '{"enable_thinking": false}' > "$LOGS/kv.server.log" 2>&1 &
   local pid=$!
   for _ in $(seq 1 360); do curl -sf localhost:8100/health >/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 5; done

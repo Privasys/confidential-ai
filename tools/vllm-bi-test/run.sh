@@ -11,7 +11,7 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env kv bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+STEPS=${STEPS:-"env kv-unit kv-before kv bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -61,7 +61,32 @@ kv() { # the CPU KV tier under CC: starts, byte-identical hits, timings
   return $code
 }
 
+SITE=/usr/local/lib/python3.12/dist-packages
+unpatch_kv() { patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
+repatch_kv() { patch -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
+KV_UNIT=v1/kv_connector/unit/test_simple_cpu_offload_cc.py
+
+kv_unit() { # the unit test passes with the CC patch and fails without it
+  pytest -v $KV_UNIT; local with=$?
+  unpatch_kv && { pytest -v $KV_UNIT; local without=$?; repatch_kv; }
+  echo "== with the patch: exit $with; without the patch: exit ${without:-?}"
+  [ "$with" = 0 ] && [ "${without:-0}" != 0 ]
+}
+
+kv_before() { # on this hardware, the unpatched engine fails to start the CPU tier
+  unpatch_kv || return 1
+  VLLM_USE_SIMPLE_KV_OFFLOAD=1 timeout 1800 vllm serve $M36 --port 8100 \
+    --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
+    --num-gpu-blocks-override 64 --kv-offloading-size 16
+  local code=$?
+  repatch_kv
+  echo "== unpatched engine exit $code (expect non-zero with cudaHostRegister failed above)"
+  [ "$code" != 0 ]
+}
+
 run env bash -c 'nvidia-smi; python3 -c "import vllm, torch; print(vllm.__version__, torch.__version__)"; cat /opt/gdn-bi.commits'
+run kv-unit kv_unit
+run kv-before kv_before
 run kv kv
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

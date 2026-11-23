@@ -42,6 +42,8 @@ RUN git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git 
     git fetch --depth 3 origin ${KV_BRANCH} && \
     git diff ${VLLM_BASE} FETCH_HEAD -- vllm/ > /opt/kv-cc.patch && \
     git log --oneline ${VLLM_BASE}..FETCH_HEAD >> /opt/gdn-bi.commits && \
+    git show FETCH_HEAD:tests/v1/kv_connector/unit/test_simple_cpu_offload_cc.py \
+      > tests/v1/kv_connector/unit/test_simple_cpu_offload_cc.py && \
     cd /usr/local/lib/python3.12/dist-packages && \
     patch -p1 --forward --no-backup-if-mismatch < /opt/gdn-bi.patch && \
     patch -p1 --forward --no-backup-if-mismatch < /opt/kv-cc.patch && \

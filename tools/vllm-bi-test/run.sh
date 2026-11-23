@@ -113,6 +113,14 @@ run kv-before kv_before
 run kv kv 0
 run kv-bi kv 1
 run sched-unit pytest -v $SCHED_UNIT
+# The suite's sliding-window test uses gated google/gemma-2-2b-it: wait for
+# the token (POST /hf-token, kept on /data across redeploys).
+hf_token() {
+  local f=/data/secrets/hf-token
+  for _ in $(seq 1 360); do [ -s $f ] && break; sleep 5; done
+  [ -s $f ] && export HF_TOKEN=$(cat $f)
+}
+case " $STEPS " in *" bi-"*) hf_token ;; esac
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

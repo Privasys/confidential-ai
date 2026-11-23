@@ -30,9 +30,18 @@ json.dump(d, open(path, "w"), indent=1)
 PY
 }
 
+RERUN=$(cat /opt/bi-test/rerun 2>/dev/null)
+
 run() { # step command...
   local step=$1; shift
   case " $STEPS " in *" $step "*) ;; *) return ;; esac
+  # A redeploy resumes: a step already done is skipped unless the image
+  # asks for it again (/opt/bi-test/rerun).
+  case " $RERUN " in *" $step "*) ;; *)
+    if python3 -c "import json,sys; sys.exit(0 if json.load(open('$LOGS/status.json')).get('$step',{}).get('state')=='done' else 1)" 2>/dev/null; then
+      return
+    fi ;;
+  esac
   status "$step" running
   echo "\$ $*" > "$LOGS/$step.log"
   "$@" >> "$LOGS/$step.log" 2>&1

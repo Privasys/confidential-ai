@@ -75,29 +75,52 @@ func (r *Reporter) CallerBillable(ctx context.Context, sub string) (bool, error)
 	return verdict, nil
 }
 
+// askBillable asks through the manager relay when it is available, and
+// falls back to the direct endpoint as send does.
 func (r *Reporter) askBillable(ctx context.Context, sub string) (bool, error) {
+	if r.useRelay() {
+		u := r.cfg.RelayURL + "/billable-caller?sub=" + url.QueryEscape(sub)
+		status, billable, err := r.getBillable(ctx, u, r.cfg.RelayToken)
+		if err != nil || status == http.StatusOK || !r.relayUnavailable(status) {
+			if err == nil && status != http.StatusOK {
+				err = fmt.Errorf("billable-caller relay status %d", status)
+			}
+			return billable, err
+		}
+	}
+	if !r.cfg.legacy() {
+		return false, errors.New("no relay and no direct endpoint")
+	}
+	status, billable, err := r.getBillable(ctx, r.billableURL(sub), r.cfg.ReportToken)
+	if err == nil && status != http.StatusOK {
+		err = fmt.Errorf("billable-caller status %d", status)
+	}
+	return billable, err
+}
+
+func (r *Reporter) getBillable(ctx context.Context, u, token string) (int, bool, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, r.billableURL(sub), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	if r.cfg.ReportToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.ReportToken)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("billable-caller status %d", resp.StatusCode)
+		return resp.StatusCode, false, nil
 	}
 	var out struct {
 		Billable bool `json:"billable"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return out.Billable, nil
+	return resp.StatusCode, out.Billable, nil
 }

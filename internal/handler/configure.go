@@ -5,8 +5,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/privasys/confidential-ai/internal/billing"
 )
@@ -41,12 +43,29 @@ func (h *Handler) toConfig(p billingConfigPayload) billing.Config {
 	if model == "" {
 		model = h.cfg.ModelName
 	}
+	relayURL, relayToken := usageRelay()
 	return billing.Config{
 		AccountID:   p.BillingAccountID,
 		ReportURL:   p.UsageReportURL,
 		ReportToken: p.UsageReportToken,
 		Model:       model,
+		RelayURL:    relayURL,
+		RelayToken:  relayToken,
 	}
+}
+
+// usageRelay returns the enclave manager's per-container base and the
+// container token, which the runtime injects into every container it starts.
+// Usage reports and billable-caller checks go through it (billing.Config);
+// empty outside an enclave.
+func usageRelay() (string, string) {
+	base := strings.TrimRight(os.Getenv("PRIVASYS_MANAGER_URL"), "/")
+	name := os.Getenv("PRIVASYS_CONTAINER_NAME")
+	token := os.Getenv("PRIVASYS_CONTAINER_TOKEN")
+	if base == "" || name == "" || token == "" {
+		return "", ""
+	}
+	return base + "/api/v1/containers/" + url.PathEscape(name), token
 }
 
 // configure handles POST /configure. It accepts the billing configuration,

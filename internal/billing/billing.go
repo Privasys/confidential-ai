@@ -33,11 +33,27 @@ type Config struct {
 	ReportURL   string // management-service AI-usage endpoint
 	ReportToken string // EnclaveToken bearer
 	Model       string // model slug for price-book lookup
+
+	// RelayURL is the enclave manager's per-container base
+	// ($PRIVASYS_MANAGER_URL/api/v1/containers/$PRIVASYS_CONTAINER_NAME). When
+	// set, usage and billable-caller checks go through it with RelayToken (the
+	// container token): the manager forwards them with the enclave's own
+	// attested credential and stamps the app id, so no account or usage token
+	// is needed here. The legacy fields above remain the fallback while a host
+	// still runs a runtime without the relay.
+	RelayURL   string
+	RelayToken string
 }
+
+// relay reports whether the manager relay is configured.
+func (c Config) relay() bool { return c.RelayURL != "" && c.RelayToken != "" }
+
+// legacy reports whether the direct AI-usage endpoint is configured.
+func (c Config) legacy() bool { return c.AccountID != "" && c.ReportURL != "" }
 
 // Disabled reports whether the reporter should be a no-op (missing config).
 func (c Config) Disabled() bool {
-	return c.AccountID == "" || c.ReportURL == ""
+	return !c.relay() && !c.legacy()
 }
 
 // usage is one completed inference request's token counts, plus the caller it
@@ -70,7 +86,9 @@ type Caller struct {
 // reportRequest is the JSON body posted to the AI-usage endpoint. It mirrors
 // management-service's aiUsageRequest.
 type reportRequest struct {
-	AccountID string            `json:"account_id"`
+	// AccountID is omitted on the relay: the control plane charges the
+	// app's owner account.
+	AccountID string            `json:"account_id,omitempty"`
 	Model     string            `json:"model"`
 	Requests  []reportRequestLn `json:"requests"`
 }
@@ -110,6 +128,12 @@ type Reporter struct {
 	billableMu sync.Mutex
 	billable   map[string]billableEntry
 	frozen     atomic.Bool
+
+	// relayDownUntil (unix nanoseconds) is set when the manager answered
+	// that it cannot relay (404: a runtime without the route; 503: relay not
+	// configured on the enclave). Until then the legacy endpoint is used,
+	// then the relay is tried again.
+	relayDownUntil atomic.Int64
 
 	// probeEvery is how often an idle reporter posts an empty batch to refresh
 	// the freeze state. Kept short enough that a newly-exhausted account is
@@ -248,33 +272,94 @@ func (r *Reporter) send(ctx context.Context, batch []usage) {
 			OutputTokens: u.OutputTokens,
 		})
 	}
-	buf, err := json.Marshal(body)
-	if err != nil {
+	if r.useRelay() {
+		relayed := body
+		relayed.AccountID = ""
+		status, out, err := r.post(ctx, r.cfg.RelayURL+"/usage", r.cfg.RelayToken, relayed)
+		switch {
+		case err != nil:
+			log.Printf("[billing] usage relay failed: %v", err)
+			return
+		case status == http.StatusOK:
+			r.frozen.Store(out.Frozen)
+			return
+		case !r.relayUnavailable(status):
+			// 502: the control plane is unreachable from the enclave, a
+			// transient failure like a failed direct call.
+			log.Printf("[billing] usage relay status %d", status)
+			return
+		}
+		// The manager cannot relay: report directly, as before.
+	}
+	if !r.cfg.legacy() {
+		log.Printf("[billing] usage not reported: no relay and no direct endpoint")
 		return
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.cfg.ReportURL, bytes.NewReader(buf))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if r.cfg.ReportToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.ReportToken)
-	}
-	resp, err := r.client.Do(req)
+	status, out, err := r.post(ctx, r.cfg.ReportURL, r.cfg.ReportToken, body)
 	if err != nil {
 		log.Printf("[billing] usage report failed: %v", err)
 		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[billing] usage report status %d", resp.StatusCode)
-		return
-	}
-	var out reportResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if status != http.StatusOK {
+		log.Printf("[billing] usage report status %d", status)
 		return
 	}
 	r.frozen.Store(out.Frozen)
+}
+
+// useRelay reports whether the next call should go through the manager.
+func (r *Reporter) useRelay() bool {
+	return r.cfg.relay() && time.Now().UnixNano() >= r.relayDownUntil.Load()
+}
+
+// relayRetry is how long the legacy endpoint is used after the manager said
+// it cannot relay, before the relay is tried again.
+const relayRetry = 10 * time.Minute
+
+// relayUnavailable records a manager answer that means "this enclave cannot
+// relay" and reports whether status was one: 404 (a runtime without the
+// relay route) or 503 (relay not configured on the enclave), and 403 (the
+// container was loaded without an app id), which is a deployment fault
+// logged loudly. The caller then falls back to the direct endpoint.
+func (r *Reporter) relayUnavailable(status int) bool {
+	switch status {
+	case http.StatusNotFound, http.StatusServiceUnavailable:
+	case http.StatusForbidden:
+		log.Printf("[billing] ERROR: the manager refused to relay usage (403): this container was loaded without an app id")
+	default:
+		return false
+	}
+	now := time.Now()
+	if prev := r.relayDownUntil.Swap(now.Add(relayRetry).UnixNano()); prev <= now.UnixNano() {
+		log.Printf("[billing] usage relay unavailable (status %d); reporting directly for %v", status, relayRetry)
+	}
+	return true
+}
+
+// post sends one JSON report and decodes the reply on a 200.
+func (r *Reporter) post(ctx context.Context, url, token string, body reportRequest) (int, reportResponse, error) {
+	var out reportResponse
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return 0, out, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return 0, out, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return 0, out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		err = json.NewDecoder(resp.Body).Decode(&out)
+	}
+	return resp.StatusCode, out, err
 }

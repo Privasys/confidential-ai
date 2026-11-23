@@ -128,14 +128,17 @@ func New(cfg *config.Config, fleet *models.Fleet) *Handler {
 	if modelSlug == "" {
 		modelSlug = cfg.ModelName
 	}
+	relayURL, relayToken := usageRelay()
 	if rep := billing.New(billing.Config{
 		AccountID:   cfg.BillingAccountID,
 		ReportURL:   cfg.UsageReportURL,
 		ReportToken: cfg.UsageReportToken,
 		Model:       modelSlug,
+		RelayURL:    relayURL,
+		RelayToken:  relayToken,
 	}); rep != nil {
 		h.billing.Store(rep)
-		log.Printf("[billing] inference metering enabled from env (account=%s, model=%s)", cfg.BillingAccountID, modelSlug)
+		log.Printf("[billing] inference metering enabled (relay=%t, account=%s, model=%s)", relayURL != "", cfg.BillingAccountID, modelSlug)
 	}
 	return h
 }

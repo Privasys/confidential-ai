@@ -19,8 +19,11 @@ ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 # FlashInfer pinned by URL as in the production image; only the H100
 # (sm90a) jit-cache provider, with the wrapper, without dependencies.
+# torchaudio: main pins 2.11.1, which has no cu130 wheel yet; 2.11.0 is the
+# one on the cu130 index, and nothing here uses audio.
 RUN pip3 install --no-cache-dir --break-system-packages uv && \
-    uv pip install --system --torch-backend=cu130 \
+    echo "torchaudio==2.11.0" > /tmp/overrides.txt && \
+    uv pip install --system --torch-backend=cu130 --override /tmp/overrides.txt \
       "https://wheels.vllm.ai/${VLLM_BASE}/${VLLM_WHEEL}" \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl" && \
     uv pip install --system --no-deps \

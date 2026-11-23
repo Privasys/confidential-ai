@@ -15,7 +15,7 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env kv-unit kv-before kv kv-bi bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+STEPS=${STEPS:-"env kv-unit kv-before kv kv-bi sched-unit bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -85,6 +85,9 @@ SITE=/usr/local/lib/python3.12/dist-packages
 unpatch_kv() { patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
 repatch_kv() { patch -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
 KV_UNIT="v1/simple_kv_offload/test_worker.py -k confidential_compute"
+# The scheduler side of GDN chunked-prefill invariance, and the Mamba split
+# tests next to it.
+SCHED_UNIT="v1/core/test_prefill_chunk_alignment.py v1/core/test_mamba_align_chunk_split.py"
 
 kv_unit() { # the unit test passes with the CC patch and fails without it
   pytest -v $KV_UNIT; local with=$?
@@ -109,6 +112,7 @@ run kv-unit kv_unit
 run kv-before kv_before
 run kv kv 0
 run kv-bi kv 1
+run sched-unit pytest -v $SCHED_UNIT
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

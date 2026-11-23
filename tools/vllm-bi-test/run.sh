@@ -11,7 +11,7 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+STEPS=${STEPS:-"env kv bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -47,7 +47,22 @@ bench() { # bi
   return $code
 }
 
+kv() { # the CPU KV tier under CC: starts, byte-identical hits, timings
+  # A small GPU KV cache makes a few long prompts evict to the CPU tier.
+  VLLM_BATCH_INVARIANT=1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
+    --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
+    --num-gpu-blocks-override 64 --kv-offloading-size 16 \
+    --default-chat-template-kwargs '{"enable_thinking": false}' > "$LOGS/kv.server.log" 2>&1 &
+  local pid=$!
+  for _ in $(seq 1 360); do curl -sf localhost:8100/health >/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 5; done
+  python3 /opt/bi-test/kv_test.py http://localhost:8100 $M36
+  local code=$?
+  kill $pid; wait $pid 2>/dev/null
+  return $code
+}
+
 run env bash -c 'nvidia-smi; python3 -c "import vllm, torch; print(vllm.__version__, torch.__version__)"; cat /opt/gdn-bi.commits'
+run kv kv
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

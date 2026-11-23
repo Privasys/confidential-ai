@@ -28,14 +28,21 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_jit_cache_sm90a-0.7.4+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" && \
     uv pip install --system pytest pytest-asyncio pytest-timeout anthropic tblib cloudpickle httpx requests openai "lm-eval==0.4.13"
 
-# The branch: its tests/ tree, and its diff applied onto the installed wheel.
+# The branches: the batch-invariance branch's tests/ tree, and both branches'
+# diffs (batch invariance, CPU KV tier under CC) applied onto the wheel.
+ARG KV_BRANCH=cpu-kv-offload-cc
 RUN git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git /opt/vllm-src && \
     cd /opt/vllm-src && git fetch --depth 1 origin ${VLLM_BASE} && \
     git diff ${VLLM_BASE} HEAD -- vllm/ > /opt/gdn-bi.patch && \
     git log --oneline ${VLLM_BASE}..HEAD > /opt/gdn-bi.commits && \
+    git fetch --depth 3 origin ${KV_BRANCH} && \
+    git diff ${VLLM_BASE} FETCH_HEAD -- vllm/ > /opt/kv-cc.patch && \
+    git log --oneline ${VLLM_BASE}..FETCH_HEAD >> /opt/gdn-bi.commits && \
     cd /usr/local/lib/python3.12/dist-packages && \
     patch -p1 --forward --no-backup-if-mismatch < /opt/gdn-bi.patch && \
+    patch -p1 --forward --no-backup-if-mismatch < /opt/kv-cc.patch && \
     grep -q 'class QwenGDNAttentionBackend' vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py && \
+    grep -q 'CPU offload buffers' vllm/v1/simple_kv_offload/worker.py && \
     rm -rf /opt/vllm-src/vllm
 
 # As in the production image: the Qwen Triton warmup's synthetic GDN shapes
@@ -49,7 +56,7 @@ p.write_text(src + "\n\ndef qwen_triton_warmup(runner, model_config):  # noqa: F
 PYEOF
 ENV VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0
 
-COPY run.sh serve.py /opt/bi-test/
+COPY run.sh serve.py kv_test.py /opt/bi-test/
 RUN chmod +x /opt/bi-test/run.sh
 
 LABEL ai.privasys.devices="/dev/nvidia0,/dev/nvidiactl,/dev/nvidia-uvm,/dev/nvidia-uvm-tools"

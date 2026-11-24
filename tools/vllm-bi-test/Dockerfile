@@ -8,8 +8,8 @@
 # same way the production image patches its release wheel.
 FROM nvidia/cuda:13.0.3-devel-ubuntu24.04
 
-ARG VLLM_BASE=d9bfe86b9fe1156642ac45aadef965159dd1d7f1
-ARG VLLM_WHEEL=vllm-0.34.0rc1.dev1181%2Bgd9bfe86b9-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_BASE=84981aa792dac06677d516f68551e12e56f5bc77
+ARG VLLM_WHEEL=vllm-0.34.1rc1.dev64%2Bg84981aa79-cp38-abi3-manylinux_2_28_x86_64.whl
 ARG BRANCH=gdn-batch-invariance
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,28 +32,13 @@ RUN pip3 install --no-cache-dir --break-system-packages uv && \
       "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_jit_cache_sm90a-0.7.4+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" && \
     uv pip install --system pytest pytest-asyncio pytest-timeout anthropic tblib cloudpickle httpx requests openai "lm-eval==0.4.13"
 
-# The branches: the batch-invariance branch's tests/ tree, and both branches'
-# diffs (batch invariance, CPU KV tier under CC) applied onto the wheel.
-ARG KV_BRANCH=cpu-kv-offload-cc
-# The branch heads (set by the workflow), so a moved branch invalidates the
+# The branch's tests/ tree and its diff applied onto the wheel; main's own
+# tests/ tree too, for the "main" run (with the diff reversed).
+# The branch head (set by the workflow), so a moved branch invalidates the
 # clone below (BuildKit otherwise reuses the cached layer).
 ARG BI_HEAD=unset
 ARG KV_HEAD=unset
-RUN echo "heads: $BI_HEAD $KV_HEAD" && git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git /opt/vllm-src && \
-    cd /opt/vllm-src && git fetch --depth 1 origin ${VLLM_BASE} && \
-    git diff ${VLLM_BASE} HEAD -- vllm/ > /opt/gdn-bi.patch && \
-    git log --oneline ${VLLM_BASE}..HEAD > /opt/gdn-bi.commits && \
-    git fetch --depth 3 origin ${KV_BRANCH} && \
-    git diff ${VLLM_BASE} FETCH_HEAD -- vllm/ > /opt/kv-cc.patch && \
-    git log --oneline ${VLLM_BASE}..FETCH_HEAD >> /opt/gdn-bi.commits && \
-    git show FETCH_HEAD:tests/v1/simple_kv_offload/test_worker.py \
-      > tests/v1/simple_kv_offload/test_worker.py && \
-    cd /usr/local/lib/python3.12/dist-packages && \
-    patch -p1 --forward --no-backup-if-mismatch < /opt/gdn-bi.patch && \
-    patch -p1 --forward --no-backup-if-mismatch < /opt/kv-cc.patch && \
-    grep -q 'class QwenGDNAttentionBackend' vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py && \
-    grep -q 'CPU offload buffers' vllm/v1/simple_kv_offload/worker.py && \
-    rm -rf /opt/vllm-src/vllm
+RUN echo "head: $BI_HEAD" && git clone --depth 4 --branch ${BRANCH} https://github.com/Privasys/vllm.git /opt/vllm-src &&     cd /opt/vllm-src && git fetch --depth 1 origin ${VLLM_BASE} &&     git diff ${VLLM_BASE} HEAD -- vllm/ > /opt/gdn-bi.patch &&     git log --oneline ${VLLM_BASE}..HEAD > /opt/gdn-bi.commits &&     mkdir -p /opt/vllm-main && git archive ${VLLM_BASE} tests | tar -x -C /opt/vllm-main &&     cd /usr/local/lib/python3.12/dist-packages &&     patch -p1 --forward --no-backup-if-mismatch < /opt/gdn-bi.patch &&     grep -q 'class QwenGDNAttentionBackend' vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py &&     rm -rf /opt/vllm-src/vllm
 
 # As in the production image: the Qwen Triton warmup's synthetic GDN shapes
 # hang a kernel launch on the H100 in CC mode, and DeepGEMM's FP8 JIT is off.
@@ -66,7 +51,7 @@ p.write_text(src + "\n\ndef qwen_triton_warmup(runner, model_config):  # noqa: F
 PYEOF
 ENV VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0
 
-COPY run.sh serve.py kv_test.py rerun /opt/bi-test/
+COPY run.sh serve.py rerun /opt/bi-test/
 RUN chmod +x /opt/bi-test/run.sh
 
 LABEL org.opencontainers.image.source="https://github.com/Privasys/vllm"

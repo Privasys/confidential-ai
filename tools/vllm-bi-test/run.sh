@@ -15,7 +15,7 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env kv-unit kv-before kv kv-bi sched-unit bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+STEPS=${STEPS:-"env sched-unit main-0.8b bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -66,52 +66,20 @@ bench() { # bi
   return $code
 }
 
-kv() { # bi: the CPU KV tier under CC: starts, hits, timings (byte-identical required with bi=1)
-  # Dev mode exposes /reset_prefix_cache: the test clears the GPU prefix
-  # cache so its repeat request can only be served from the CPU tier.
-  VLLM_SERVER_DEV_MODE=1 VLLM_BATCH_INVARIANT=$1 VLLM_USE_SIMPLE_KV_OFFLOAD=1 vllm serve $M36 --port 8100 \
-    --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
-    --kv-offloading-size 16 \
-    --default-chat-template-kwargs '{"enable_thinking": false}' > "$LOGS/kv-$1.server.log" 2>&1 &
-  local pid=$!
-  for _ in $(seq 1 360); do curl -sf localhost:8100/health >/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 5; done
-  python3 /opt/bi-test/kv_test.py http://localhost:8100 $M36 $1
-  local code=$?
-  kill $pid; wait $pid 2>/dev/null
-  return $code
-}
-
 SITE=/usr/local/lib/python3.12/dist-packages
-unpatch_kv() { patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
-repatch_kv() { patch -p1 -d $SITE --no-backup-if-mismatch < /opt/kv-cc.patch; }
-KV_UNIT="v1/simple_kv_offload/test_worker.py -k confidential_compute"
 # The scheduler side of GDN chunked-prefill invariance, and the Mamba split
 # tests next to it.
 SCHED_UNIT="v1/core/test_prefill_chunk_alignment.py v1/core/test_mamba_align_chunk_split.py"
 
-kv_unit() { # the unit test passes with the CC patch and fails without it
-  pytest -v $KV_UNIT; local with=$?
-  unpatch_kv && { pytest -v $KV_UNIT; local without=$?; repatch_kv; }
-  echo "== with the patch: exit $with; without the patch: exit ${without:-?}"
-  [ "$with" = 0 ] && [ "${without:-0}" != 0 ]
-}
-
-kv_before() { # on this hardware, the unpatched engine fails to start the CPU tier
-  unpatch_kv || return 1
-  VLLM_USE_SIMPLE_KV_OFFLOAD=1 timeout 1800 vllm serve $M36 --port 8100 \
-    --max-model-len 16384 --max-num-seqs 4 --enable-prefix-caching --kv-cache-dtype fp8 \
-    --num-gpu-blocks-override 64 --kv-offloading-size 16
+main_bi() { # model: the same suite on main (the diff reversed, main's tests/)
+  patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/gdn-bi.patch || return 1
+  ( cd /opt/vllm-main/tests && PYTHONPATH=/opt/vllm-main VLLM_TEST_MODEL=$1       pytest -v -s v1/determinism/test_batch_invariance.py )
   local code=$?
-  repatch_kv
-  echo "== unpatched engine exit $code (expect non-zero with cudaHostRegister failed above)"
-  [ "$code" != 0 ]
+  patch -p1 -d $SITE --no-backup-if-mismatch < /opt/gdn-bi.patch
+  return $code
 }
 
 run env bash -c 'nvidia-smi; python3 -c "import vllm, torch; print(vllm.__version__, torch.__version__)"; cat /opt/gdn-bi.commits'
-run kv-unit kv_unit
-run kv-before kv_before
-run kv kv 0
-run kv-bi kv 1
 run sched-unit pytest -v $SCHED_UNIT
 # The suite's sliding-window test uses gated google/gemma-2-2b-it: wait for
 # the token (POST /hf-token, kept on /data across redeploys).
@@ -121,6 +89,7 @@ hf_token() {
   [ -s $f ] && export HF_TOKEN=$(cat $f)
 }
 case " $STEPS " in *" bi-"*) hf_token ;; esac
+run main-0.8b main_bi Qwen/Qwen3.5-0.8B
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py

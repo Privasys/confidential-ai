@@ -15,7 +15,11 @@ LOGS=/data/logs
 mkdir -p "$LOGS"
 python3 /opt/bi-test/serve.py "$LOGS" "${PORT:-8080}" &
 
-STEPS=${STEPS:-"env sched-unit main-0.8b bi-0.8b bi-36 bi-38 lm-0 lm-1 bench-0 bench-1"}
+# This rerun: the rebased branch, the norm test, and the suite with and
+# without FlashInfer kernels. The full list: env sched-unit norm-unit
+# norm-unit-nofix main-0.8b bi-0.8b bi-0.8b-nofi bi-36 bi-38 lm-0 lm-1
+# bench-0 bench-1.
+STEPS=${STEPS:-"env sched-unit norm-unit norm-unit-nofix bi-0.8b bi-0.8b-nofi bi-36"}
 M36=Qwen/Qwen3.6-35B-A3B-FP8
 M38=Qwen/Qwen3.8-27B-FP8
 cd /opt/vllm-src/tests
@@ -79,8 +83,34 @@ main_bi() { # model: the same suite on main (the diff reversed, main's tests/)
   return $code
 }
 
+NORM_UNIT="models/qwen3_5/test_gemma_add_rms_norm_quant.py -k batch_invariant"
+
+norm_nofix() { # the norm test against the branch without its warp pin: must fail
+  local f=$SITE/vllm/models/qwen3_5/nvidia/ops/fused_norm_quant.py
+  cp $f /tmp/fused_norm_quant.py
+  sed -i 's/ and not envs.VLLM_BATCH_INVARIANT//' $f
+  grep -nE "num_warps=16|use_16_warps =" $f
+  pytest -v $NORM_UNIT
+  local code=$?
+  cp /tmp/fused_norm_quant.py $f
+  return $code
+}
+
+nofi() { # model: the suite without FlashInfer kernels (no flashinfer-cubin, no nvcc), as on a precompiled install
+  local d
+  d=$(python3 -c "import importlib.util as u, os; print(os.path.dirname(u.find_spec('flashinfer_cubin').origin))")
+  mv "$d" "$d.off"
+  CUDA_HOME=/nonexistent python3 -c "from vllm.utils.flashinfer import has_flashinfer; print('has_flashinfer', has_flashinfer())"
+  CUDA_HOME=/nonexistent VLLM_TEST_MODEL=$1 pytest -v -s v1/determinism/test_batch_invariance.py
+  local code=$?
+  mv "$d.off" "$d"
+  return $code
+}
+
 run env bash -c 'nvidia-smi; python3 -c "import vllm, torch; print(vllm.__version__, torch.__version__)"; cat /opt/gdn-bi.commits'
 run sched-unit pytest -v $SCHED_UNIT
+run norm-unit pytest -v $NORM_UNIT
+run norm-unit-nofix norm_nofix
 # The suite's sliding-window test uses gated google/gemma-2-2b-it: wait for
 # the token (POST /hf-token, kept on /data across redeploys).
 hf_token() {
@@ -91,6 +121,7 @@ hf_token() {
 case " $STEPS " in *" bi-"*) hf_token ;; esac
 run main-0.8b main_bi Qwen/Qwen3.5-0.8B
 run bi-0.8b env VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B pytest -v -s v1/determinism/test_batch_invariance.py
+run bi-0.8b-nofi nofi Qwen/Qwen3.5-0.8B
 run bi-36 env VLLM_TEST_MODEL=$M36 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run bi-38 env VLLM_TEST_MODEL=$M38 VLLM_GPU_MEMORY_UTILIZATION=0.85 pytest -v -s v1/determinism/test_batch_invariance.py
 run lm-0 lm 0

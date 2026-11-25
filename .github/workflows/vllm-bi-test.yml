@@ -40,7 +40,7 @@ jobs:
         # Build args, so a moved branch invalidates the clone layer (an ADD of
         # the GitHub API gets rate-limited on shared runners).
         run: |
-          echo "bi=$(git ls-remote https://github.com/Privasys/vllm.git refs/heads/gdn-batch-invariance | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "bi=$(git ls-remote https://github.com/Privasys/vllm.git refs/heads/gdn-bi-rerun | cut -f1)" >> "$GITHUB_OUTPUT"
           echo "kv=$(git ls-remote https://github.com/Privasys/vllm.git refs/heads/cpu-kv-offload-cc | cut -f1)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7

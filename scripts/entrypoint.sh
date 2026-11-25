@@ -152,6 +152,7 @@ VLLM_ARGS=(
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "$GPU_MEM"
   --dtype "$DTYPE"
+  --host 127.0.0.1
   --port "$VLLM_PORT"
 )
 
@@ -228,7 +229,7 @@ fi
 echo "[confidential-ai] Starting reproducibility proxy on $PROXY_PORT"
 exec /usr/local/bin/confidential-ai \
   --listen "$PROXY_PORT" \
-  --vllm-upstream "http://localhost:$VLLM_PORT" \
+  --vllm-upstream "http://127.0.0.1:$VLLM_PORT" \
   --model "$DISPLAY_NAME" \
   --quantization "$QUANT" \
   --model-digest "$MODEL_DIGEST"

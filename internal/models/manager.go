@@ -1185,6 +1185,10 @@ func buildVLLMArgs(req LoadRequest, modelPath string, port int) []string {
 		"--max-model-len", fmt.Sprintf("%d", req.MaxModelLen),
 		"--gpu-memory-utilization", fmt.Sprintf("%.2f", req.GPUMemoryUtilization),
 		"--dtype", req.Dtype,
+		// Loopback only: the proxy in this container is vLLM's one caller.
+		// vLLM's default binds every interface, which also put its
+		// unauthenticated API on the container's bridge address.
+		"--host", "127.0.0.1",
 		"--port", fmt.Sprintf("%d", port),
 	)
 	if req.MaxNumSeqs > 0 {

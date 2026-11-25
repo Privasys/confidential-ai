@@ -136,6 +136,9 @@ func TestBuildVLLMArgs_EmbedTask(t *testing.T) {
 	if got := flagValue(args, "--port"); got != "8001" {
 		t.Fatalf("--port: got %q, want 8001", got)
 	}
+	if got := flagValue(args, "--host"); got != "127.0.0.1" {
+		t.Fatalf("--host: got %q, want 127.0.0.1 (vLLM must not listen on the bridge address)", got)
+	}
 	for _, flag := range []string{"--task", "--reasoning-parser", "--tool-call-parser", "--chat-template", "--default-chat-template-kwargs", "--hf-overrides"} {
 		if slices.Contains(args, flag) {
 			t.Errorf("embed task must not emit %s: %v", flag, args)

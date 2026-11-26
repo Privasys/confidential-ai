@@ -244,14 +244,16 @@ COPY scripts/entrypoint.sh /opt/confidential-ai/entrypoint.sh
 COPY scripts/watermark_detect.py /opt/confidential-ai/watermark_detect.py
 RUN chmod +x /opt/confidential-ai/entrypoint.sh
 
-# Model disks: GCP persistent disks are auto-mounted at /mnt/model-* by
-# systemd. Bind-mount the whole /mnt into the container so the models
-# manager can discover and load any available model on-demand.
-LABEL ai.privasys.volume="/mnt:/models:ro"
+# No model disk: the image declares no volume, and the runtime refuses
+# image-declared mounts the deploy did not assign. Models load by Hugging
+# Face id into the cache on the app volume. /models stays as an empty
+# directory because the entrypoint picks dynamic loading mode by its
+# existence; a deploy that assigns a model disk mounts it here.
+RUN mkdir -p /models
 
 # GPU passthrough: this image declares the NVIDIA device nodes it needs, so
 # the manager passes them through (and enables CDI driver injection) on any
-# deploy without per-deploy configuration, mirroring the volume label above.
+# deploy without per-deploy configuration.
 LABEL ai.privasys.devices="/dev/nvidia0,/dev/nvidiactl,/dev/nvidia-uvm,/dev/nvidia-uvm-tools"
 
 # Dynamic model loading mode: Go proxy starts immediately, vLLM on-demand.

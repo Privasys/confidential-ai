@@ -71,9 +71,9 @@ bench() { # bi
 }
 
 SITE=/usr/local/lib/python3.12/dist-packages
-# The scheduler side of GDN chunked-prefill invariance, and the Mamba split
-# tests next to it.
-SCHED_UNIT="v1/core/test_prefill_chunk_alignment.py v1/core/test_mamba_align_chunk_split.py"
+# The scheduler side of GDN chunked-prefill invariance, with the Mamba split
+# tests in the same file.
+SCHED_UNIT="v1/core/test_mamba_align_chunk_split.py"
 
 main_bi() { # model: the same suite on main (the diff reversed, main's tests/)
   patch -R -p1 -d $SITE --no-backup-if-mismatch < /opt/gdn-bi.patch || return 1

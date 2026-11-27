@@ -8,8 +8,8 @@
 # same way the production image patches its release wheel.
 FROM nvidia/cuda:13.0.3-devel-ubuntu24.04
 
-ARG VLLM_BASE=689b84c3697623552c0a11eb1e348bf32bc31bba
-ARG VLLM_WHEEL=vllm-0.34.1rc1.dev133%2Bg689b84c36-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_BASE=9172ffc42e16e3a276ab8519c6d6a949c0f1d76c
+ARG VLLM_WHEEL=vllm-0.34.1rc1.dev292%2Bg9172ffc42-cp38-abi3-manylinux_2_28_x86_64.whl
 # The rebased PR branch, pushed under its own name until its tests pass.
 ARG BRANCH=gdn-bi-rerun
 
